@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
 import { banqueSchema, configSchema, mouvementSchema, movementFilterSchema } from './banque.schema.js';
 
 const router = Router();
@@ -22,7 +22,7 @@ router.post('/banques', ...read, requireRole('gerant'), async (request, response
 router.get('/banques/:id/mouvements', ...read, async (request, response, next) => {
   try {
     const filter = movementFilterSchema.parse(request.query);
-    const movements = await prisma.detMvtBq.findMany({ where: { banqueId: Number(request.params.id), modePaymentId: filter.modePaymentId, rapproche: filter.rapproche === undefined ? undefined : filter.rapproche === 'true', date: dateFilter(filter.dateFrom, filter.dateTo) }, include: { banque: true, modePayment: true }, orderBy: { date: 'desc' } });
+    const movements = await prisma.detMvtBq.findMany({ where: scopeToMagasin(request, { banqueId: Number(request.params.id), modePaymentId: filter.modePaymentId, rapproche: filter.rapproche === undefined ? undefined : filter.rapproche === 'true', date: dateFilter(filter.dateFrom, filter.dateTo) }), include: { banque: true, modePayment: true }, orderBy: { date: 'desc' } });
     response.json(movements.map((movement) => ({ ...movement, montant: numberValue(movement.montant) })));
   } catch (error) { next(error); }
 });
@@ -30,13 +30,13 @@ router.get('/banques/:id/mouvements', ...read, async (request, response, next) =
 router.post('/banques/mouvements', ...write, async (request, response, next) => {
   try {
     const input = mouvementSchema.parse(request.body);
-    const movement = await prisma.detMvtBq.create({ data: { banqueId: input.banqueId, modePaymentId: input.modePaymentId, date: toDate(input.date), dateEcheance: input.dateEcheance ? toDate(input.dateEcheance) : undefined, montant: new Prisma.Decimal(input.montant), numMvtBq: input.numMvtBq, numLigne: input.numLigne } });
+    const movement = await prisma.detMvtBq.create({ data: { magasinId: request.user?.magasinId, banqueId: input.banqueId, modePaymentId: input.modePaymentId, date: toDate(input.date), dateEcheance: input.dateEcheance ? toDate(input.dateEcheance) : undefined, montant: new Prisma.Decimal(input.montant), numMvtBq: input.numMvtBq, numLigne: input.numLigne } });
     response.status(201).json({ ...movement, montant: numberValue(movement.montant) });
   } catch (error) { next(error); }
 });
 
 router.patch('/banques/mouvements/:id/rapprocher', ...write, async (request, response, next) => {
-  try { const movement = await prisma.detMvtBq.update({ where: { id: Number(request.params.id) }, data: { rapproche: true } }); response.json({ ...movement, montant: numberValue(movement.montant) }); } catch (error) { next(error); }
+  try { const movement = await prisma.detMvtBq.findFirst({ where: { id: Number(request.params.id), ...scopeToMagasin(request, {}) } }); if (!movement) { response.status(404).json({ message: 'Mouvement introuvable.' }); return; } const updated = await prisma.detMvtBq.update({ where: { id: movement.id }, data: { rapproche: true } }); response.json({ ...updated, montant: numberValue(updated.montant) }); } catch (error) { next(error); }
 });
 
 router.get('/banques/position/:banqueId', ...read, async (request, response, next) => {

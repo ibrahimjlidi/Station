@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
 import { achatSchema, familleSchema, filterSchema, inventSchema, produitSchema, transfertSchema } from './boutique.schema.js';
 
 const router = Router();
@@ -41,7 +41,7 @@ router.post('/achats-produits', ...cashier, async (request, response, next) => {
     const totalHT = input.lignes.reduce((sum, line) => sum + line.quantite * line.prixAchat, 0);
     const totalTTC = input.lignes.reduce((sum, line) => sum + line.quantite * line.prixAchat * (1 + line.tauxTVA / 100), 0);
     const purchase = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.achatProd.create({ data: { fournisseurId: input.fournisseurId, dateAchat: toDate(input.dateAchat), dateFacture: input.dateFacture ? toDate(input.dateFacture) : undefined, numFacture: input.numFacture, totalTTC: new Prisma.Decimal(totalTTC), totHT: new Prisma.Decimal(totalHT), valide: input.valide, details: { create: input.lignes.map((line) => ({ produitId: line.produitId, date: toDate(input.dateAchat), quantite: new Prisma.Decimal(line.quantite), prixAchat: new Prisma.Decimal(line.prixAchat), tauxTVA: new Prisma.Decimal(line.tauxTVA), valide: input.valide })) } }, include: { details: true } });
+      const created = await transaction.achatProd.create({ data: { magasinId: request.user?.magasinId, fournisseurId: input.fournisseurId, dateAchat: toDate(input.dateAchat), dateFacture: input.dateFacture ? toDate(input.dateFacture) : undefined, numFacture: input.numFacture, totalTTC: new Prisma.Decimal(totalTTC), totHT: new Prisma.Decimal(totalHT), valide: input.valide, details: { create: input.lignes.map((line) => ({ produitId: line.produitId, date: toDate(input.dateAchat), quantite: new Prisma.Decimal(line.quantite), prixAchat: new Prisma.Decimal(line.prixAchat), tauxTVA: new Prisma.Decimal(line.tauxTVA), valide: input.valide })) } }, include: { details: true } });
       for (const line of input.lignes) await transaction.produit.update({ where: { id: line.produitId }, data: { stock: { increment: new Prisma.Decimal(line.quantite) }, prixAchatHT: new Prisma.Decimal(line.prixAchat) } });
       return created;
     });
@@ -50,7 +50,7 @@ router.post('/achats-produits', ...cashier, async (request, response, next) => {
 });
 
 router.get('/achats-produits', ...read, async (request, response, next) => {
-  try { const filter = filterSchema.parse(request.query); const purchases = await prisma.achatProd.findMany({ where: { fournisseurId: filter.fournisseurId, dateAchat: dateFilter(filter.dateFrom, filter.dateTo) }, include: { fournisseur: true, details: { include: { produit: true } } }, orderBy: { dateAchat: 'desc' } }); response.json(purchases.map((purchase) => ({ ...purchase, totalTTC: numberValue(purchase.totalTTC), totHT: numberValue(purchase.totHT), reste: numberValue(purchase.reste) }))); } catch (error) { next(error); }
+  try { const filter = filterSchema.parse(request.query); const purchases = await prisma.achatProd.findMany({ where: scopeToMagasin(request, { fournisseurId: filter.fournisseurId, dateAchat: dateFilter(filter.dateFrom, filter.dateTo) }), include: { fournisseur: true, details: { include: { produit: true } } }, orderBy: { dateAchat: 'desc' } }); response.json(purchases.map((purchase) => ({ ...purchase, totalTTC: numberValue(purchase.totalTTC), totHT: numberValue(purchase.totHT), reste: numberValue(purchase.reste) }))); } catch (error) { next(error); }
 });
 
 router.post('/inventaires', ...read, async (request, response, next) => {

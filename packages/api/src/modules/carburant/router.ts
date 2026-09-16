@@ -103,16 +103,10 @@ router.patch('/pompes/relever/:id/fermer', requireRole('gerant', 'caissier'), as
   } catch (error) { next(error); }
 });
 
-router.get('/cuves/stock', async (_request, response, next) => {
+router.get('/cuves/stock', async (request, response, next) => {
   try {
-    const cuves = await prisma.cuve.findMany({ include: { detailsAchat: { include: { achat: true } } }, orderBy: { code: 'asc' } });
-    const releves = await prisma.mobVCarCaisse.findMany({ where: { indexFermeture: { not: null } }, include: { pompe: true } });
-    response.json(cuves.map((cuve) => {
-      const achats = cuve.detailsAchat.reduce((total, detail) => total + Number(detail.quantite) * (detail.achat.type === 'retour' ? -1 : 1), 0);
-      const sorties = releves.filter((releve) => releve.pompe.cuveId === cuve.id).reduce((total, releve) => total + Number(releve.indexFermeture!.minus(releve.indexOuverture)), 0);
-      const stockActuel = Number(cuve.stockInitial) + achats - sorties;
-      return { id: cuve.id, code: cuve.code, libelle: cuve.libelle, carburant: cuve.carburant, volumeTotal: Number(cuve.volumeTotal), stockActuel, pourcentage: Math.max(0, Math.min(100, stockActuel / Number(cuve.volumeTotal) * 100)) };
-    }));
+    const cuves = await prisma.cuve.findMany({ where: scopeToMagasin(request, {}), orderBy: { code: 'asc' } });
+    response.json(cuves.map((cuve) => { const stockActuel = Number(cuve.stock); return { id: cuve.id, code: cuve.code, libelle: cuve.libelle, carburant: cuve.carburant, volumeTotal: Number(cuve.volumeTotal), stockActuel, pourcentage: Math.max(0, Math.min(100, stockActuel / Number(cuve.volumeTotal) * 100)) }; }));
   } catch (error) { next(error); }
 });
 

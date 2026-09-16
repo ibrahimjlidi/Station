@@ -38,6 +38,10 @@ export function scopeToMagasin<T extends Record<string, unknown>>(request: AuthR
   return request.user?.magasinId == null ? where : { ...where, magasinId: request.user.magasinId };
 }
 
+export function requestMagasinId(request: AuthRequest): number | undefined {
+  return request.user?.magasinId ?? undefined;
+}
+
 export function requireRole(...roles: Role[]) {
   return (request: AuthRequest, response: Response, next: NextFunction) => {
     if (!request.user || !roles.includes(request.user.role)) {

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
 import { clotureSchema, creditLineSchema, depenseLineSchema, recetteLineSchema, sessionSchema, summaryParamsSchema, type SessionInput } from './caisse.schema.js';
 
 const router = Router();
@@ -52,7 +52,7 @@ router.post('/recettes', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.recetteCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId }, update: { vendeurId: input.vendeurId } });
+    const session = await prisma.recetteCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
     response.status(201).json({ ...session, totalRecettes: toNumber(session.totalRecettes) });
   } catch (error) { next(error); }
 });
@@ -80,7 +80,7 @@ router.post('/depenses', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.depensesCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId }, update: { vendeurId: input.vendeurId } });
+    const session = await prisma.depensesCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
     response.status(201).json({ ...session, totalDepenses: toNumber(session.totalDepenses) });
   } catch (error) { next(error); }
 });
@@ -108,7 +108,7 @@ router.post('/credits', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.creditCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId }, update: { vendeurId: input.vendeurId } });
+    const session = await prisma.creditCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
     response.status(201).json({ ...session, totalCredits: toNumber(session.totalCredits) });
   } catch (error) { next(error); }
 });

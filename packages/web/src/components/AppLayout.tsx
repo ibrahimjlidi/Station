@@ -24,7 +24,7 @@ export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuthStore();
-  const visibleItems = user?.role === 'vendeur' ? items.filter((item) => item.key !== '/caisse') : items;
+  const visibleItems = items.filter((item) => user?.role !== 'vendeur' || item.key !== '/caisse').map((item) => item.key === 'entretien-section' && user?.role !== 'gerant' ? { ...item, children: item.children?.filter((child) => child.key !== '/entretien/services') } : item);
   const menuItems = user?.role === 'gerant' ? [...visibleItems, { key: '/referentiels', icon: <SettingOutlined />, label: 'Référentiels' }, { key: '/utilisateurs', icon: <SettingOutlined />, label: 'Utilisateurs' }] : visibleItems;
   return <Layout className="app-shell">
     <Sider collapsible collapsed={collapsed} trigger={null} className="app-sider">

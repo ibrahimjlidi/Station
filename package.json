@@ -6,6 +6,7 @@
     "dev": "pnpm --parallel --filter @station/api --filter @station/web dev",
     "build": "pnpm --parallel --filter @station/api --filter @station/web build",
     "typecheck": "pnpm --parallel --filter @station/api --filter @station/web typecheck",
+    "smoke": "node scripts/smoke-production.mjs",
     "db:generate": "pnpm --filter @station/api prisma:generate",
     "db:migrate": "pnpm --filter @station/api prisma:migrate"
   },
