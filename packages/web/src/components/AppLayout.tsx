@@ -3,6 +3,7 @@ import { AppstoreOutlined, BankOutlined, CreditCardOutlined, DashboardOutlined, 
 import { Button, Layout, Menu, Tag, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../lib/auth';
+import { canAccess, permissionForPath } from '../lib/permissions';
 
 const { Header, Sider, Content } = Layout;
 const items = [
@@ -24,8 +25,13 @@ export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuthStore();
-  const visibleItems = items.filter((item) => user?.role !== 'vendeur' || item.key !== '/caisse').map((item) => item.key === 'entretien-section' && user?.role !== 'gerant' ? { ...item, children: item.children?.filter((child) => child.key !== '/entretien/services') } : item);
-  const menuItems = user?.role === 'gerant' ? [...visibleItems, { key: '/referentiels', icon: <SettingOutlined />, label: 'Référentiels' }, { key: '/utilisateurs', icon: <SettingOutlined />, label: 'Utilisateurs' }] : visibleItems;
+  const visibleItems = items
+    .map((item) => ({ ...item, children: item.children?.filter((child) => canAccess(user?.role, permissionForPath(child.key))) }))
+    .filter((item) => item.children ? item.children.length > 0 : canAccess(user?.role, permissionForPath(item.key)));
+  const menuItems = [...visibleItems,
+    ...(canAccess(user?.role, 'referentiels') ? [{ key: '/referentiels', icon: <SettingOutlined />, label: 'Référentiels' }] : []),
+    ...(canAccess(user?.role, 'utilisateurs') ? [{ key: '/utilisateurs', icon: <SettingOutlined />, label: 'Utilisateurs' }] : []),
+  ];
   return <Layout className="app-shell">
     <Sider collapsible collapsed={collapsed} trigger={null} className="app-sider">
       <div className="brand"><span className="brand-mark">S</span>{!collapsed && <span>STATION<span className="brand-accent">/</span>OS</span>}</div>
