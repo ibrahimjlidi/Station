@@ -1,0 +1,4 @@
+import { Button, Card, Table, Typography } from 'antd';
+import { useSoldesFournisseurs } from '../hooks/useRapports';
+import { downloadCsv } from '../../../lib/csv';
+export function SoldesFournisseurs() { const { data = [] } = useSoldesFournisseurs(); const exportCsv = () => downloadCsv(data, 'soldes-fournisseurs.csv'); return <section className="page-section"><div className="page-heading"><div><Typography.Text className="eyebrow">RAPPORTS / FOURNISSEURS</Typography.Text><Typography.Title level={2}>Soldes fournisseurs</Typography.Title></div><Button onClick={exportCsv}>Exporter CSV</Button></div><Card><Table rowKey="id" dataSource={data} columns={[{ title: 'Fournisseur', dataIndex: 'raisonSociale' }, { title: 'Total achats', dataIndex: 'totalAchats' }, { title: 'Total réglé', dataIndex: 'totalRegle' }, { title: 'Reste', dataIndex: 'reste', render: (value) => <Typography.Text type="danger">{value.toFixed(3)} TND</Typography.Text> }]} /></Card></section>; }

@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE `user` ADD COLUMN `lastLoginAt` DATETIME(3) NULL,
+    ADD COLUMN `prenom` VARCHAR(120) NOT NULL DEFAULT '',
+    ADD COLUMN `telephone` VARCHAR(30) NULL;

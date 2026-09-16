@@ -1,0 +1,11 @@
+import { useState } from 'react';
+import { Card, Drawer, Input, Table, Typography } from 'antd';
+import { useFournisseurs, useReglementsFournisseurs } from '../hooks/useFournisseurs';
+
+const money = (value: number) => `${(value ?? 0).toFixed(3)} TND`;
+
+export function ListeFournisseurs() {
+  const [search, setSearch] = useState(''); const [selected, setSelected] = useState<number>(); const { data: fournisseurs = [], isLoading } = useFournisseurs(); const { data: reglements = [] } = useReglementsFournisseurs(); const visible = fournisseurs.filter((item) => item.raisonSociale.toLowerCase().includes(search.toLowerCase()) || item.code.toLowerCase().includes(search.toLowerCase()));
+  const current = fournisseurs.find((item) => item.id === selected);
+  return <section className="page-section"><div className="page-heading"><div><Typography.Text className="eyebrow">FOURNISSEURS / COMPTABILITÉ</Typography.Text><Typography.Title level={2}>Fournisseurs</Typography.Title></div><Input.Search placeholder="Rechercher" style={{ width: 260 }} onChange={(event) => setSearch(event.target.value)} /></div><Card><Table rowKey="id" loading={isLoading} dataSource={visible} onRow={(record) => ({ onClick: () => setSelected(record.id) })} columns={[{ title: 'Fournisseur', dataIndex: 'raisonSociale' }, { title: 'Code', dataIndex: 'code' }, { title: 'Total achats', dataIndex: 'totalAchats', render: money }, { title: 'Total réglé', dataIndex: 'totalRegle', render: money }, { title: 'Solde restant', dataIndex: 'soldeRestant', render: (value) => <Typography.Text type={value > 0 ? 'danger' : 'success'}>{money(value)}</Typography.Text> }]} /></Card><Drawer title={current?.raisonSociale ?? 'Détail fournisseur'} open={Boolean(selected)} onClose={() => setSelected(undefined)} width={620}><Typography.Paragraph>Code: {current?.code}</Typography.Paragraph><Typography.Paragraph>Solde restant: <strong>{money(current?.soldeRestant ?? 0)}</strong></Typography.Paragraph><Table rowKey="id" pagination={false} dataSource={reglements.filter((item) => item.fournisseur.id === selected)} columns={[{ title: 'Date', dataIndex: 'date' }, { title: 'Montant', dataIndex: 'montantTotal', render: money }, { title: 'Reste', dataIndex: 'reste', render: money }]} /></Drawer></section>;
+}

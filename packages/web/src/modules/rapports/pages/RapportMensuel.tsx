@@ -1,0 +1,5 @@
+import { useState } from 'react';
+import dayjs from 'dayjs';
+import { Card, DatePicker, Row, Col, Statistic, Typography } from 'antd';
+import { useMensuel } from '../hooks/useRapports';
+export function RapportMensuel() { const [month, setMonth] = useState(dayjs()); const { data } = useMensuel({ mois: month.month() + 1, annee: month.year() }); return <section className="page-section"><div className="page-heading"><div><Typography.Text className="eyebrow">RAPPORTS / MENSUEL</Typography.Text><Typography.Title level={2}>Rapport mensuel</Typography.Title></div><DatePicker picker="month" value={month} onChange={(value) => value && setMonth(value)} /></div><Row gutter={[16, 16]}>{[['CA carburant', data?.caCarburant], ['CA boutique', data?.caBoutique], ['Achats carburant', data?.totalAchatsCarburant], ['Achats produits', data?.totalAchatsProduits], ['Dépenses', data?.totalDepenses], ['Marge brute', data?.margeBrute]].map(([title, value]) => <Col xs={24} sm={12} lg={8} key={String(title)}><Card><Statistic title={title as string} value={Number(value ?? 0)} precision={3} suffix="TND" /></Card></Col>)}</Row></section>; }

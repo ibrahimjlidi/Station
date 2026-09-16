@@ -1,0 +1,15 @@
+{
+  "name": "station-service",
+  "private": true,
+  "packageManager": "pnpm@10.22.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @station/api --filter @station/web dev",
+    "build": "pnpm --parallel --filter @station/api --filter @station/web build",
+    "typecheck": "pnpm --parallel --filter @station/api --filter @station/web typecheck",
+    "db:generate": "pnpm --filter @station/api prisma:generate",
+    "db:migrate": "pnpm --filter @station/api prisma:migrate"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

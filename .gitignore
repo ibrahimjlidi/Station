@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Local databases and generated files
+*.sqlite
+*.sqlite3
+packages/api/prisma/*.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+.DS_Store
+Thumbs.db
+
+# IDE and OS files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Generated Prisma client
+# Keep Prisma schema and migrations tracked

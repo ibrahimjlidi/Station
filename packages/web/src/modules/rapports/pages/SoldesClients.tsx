@@ -1,0 +1,4 @@
+import { Button, Card, Table, Typography } from 'antd';
+import { useSoldesClients } from '../hooks/useRapports';
+import { downloadCsv } from '../../../lib/csv';
+export function SoldesClients() { const { data = [] } = useSoldesClients(); const exportCsv = () => downloadCsv(data, 'soldes-clients.csv'); return <section className="page-section"><div className="page-heading"><div><Typography.Text className="eyebrow">RAPPORTS / CLIENTS</Typography.Text><Typography.Title level={2}>Soldes clients</Typography.Title></div><Button onClick={exportCsv}>Exporter CSV</Button></div><Card><Table rowKey="id" dataSource={data} columns={[{ title: 'Client', dataIndex: 'nomClient' }, { title: 'Solde', dataIndex: 'solde', render: (value) => <Typography.Text type="danger">{value.toFixed(3)} TND</Typography.Text> }]} /></Card></section>; }
