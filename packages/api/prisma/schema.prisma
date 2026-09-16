@@ -406,6 +406,15 @@ model RecetteCaisse {
   caisseId      Int
   vendeurId     Int
   totalRecettes Decimal               @default(0) @db.Decimal(15, 3)
+  reserveDepart Decimal               @default(0) @db.Decimal(15, 3)
+  recetteTheorique Decimal            @default(0) @db.Decimal(15, 3)
+  ecartRecette  Decimal               @default(0) @db.Decimal(15, 3)
+  reserveFinTheorique Decimal         @default(0) @db.Decimal(15, 3)
+  reserveFinAttendue Decimal          @default(0) @db.Decimal(15, 3)
+  ecartCaisse   Decimal               @default(0) @db.Decimal(15, 3)
+  seuilTolerance Decimal              @default(0.5) @db.Decimal(15, 3)
+  commentaireEcart String?            @db.Text
+  validePar     Int?
   fait          Boolean               @default(false)
   equipe        Equipe                @relation(fields: [equipeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   caisse        Caisse                @relation(fields: [caisseId], references: [id], onDelete: Restrict, onUpdate: Cascade)

@@ -52,7 +52,9 @@ router.post('/recettes', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.recetteCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
+    const cuves = await prisma.cuve.findMany({ where: { magasinId: request.user?.magasinId } });
+    const reserveDepart = cuves.reduce((total, cuve) => total.plus(cuve.stock.times(cuve.prixAchatHT)), new Prisma.Decimal(0));
+    const session = await prisma.recetteCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId, reserveDepart }, update: { vendeurId: input.vendeurId } });
     response.status(201).json({ ...session, totalRecettes: toNumber(session.totalRecettes) });
   } catch (error) { next(error); }
 });
@@ -134,15 +136,37 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
   try {
     const input = clotureSchema.parse(request.body);
     const date = toDate(input.date);
-    const closure = await prisma.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } } });
-    if (closure?.fait) { response.status(409).json({ message: 'Cette equipe est deja cloturee pour cette date.' }); return; }
-    const result = await prisma.joursClotures.upsert({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } }, create: { dateJour: date, equipeId: input.equipeId, fait: true }, update: { fait: true } });
-    await prisma.$transaction([
-      prisma.recetteCaisse.updateMany({ where: { date, equipeId: input.equipeId }, data: { fait: true } }),
-      prisma.depensesCaisse.updateMany({ where: { date, equipeId: input.equipeId }, data: { fait: true } }),
-      prisma.creditCaisse.updateMany({ where: { date, equipeId: input.equipeId }, data: { fait: true } }),
-    ]);
-    response.json({ ...result, dateJour: result.dateJour.toISOString().slice(0, 10) });
+    if (input.forcer && request.user?.role !== 'gerant') { response.status(403).json({ message: 'Seul un gerant peut forcer une cloture avec ecart.' }); return; }
+    if (input.forcer && !input.commentaire) { response.status(400).json({ message: 'Un commentaire est obligatoire pour forcer la cloture.' }); return; }
+    const result = await prisma.$transaction(async (transaction) => {
+      const closure = await transaction.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } } });
+      if (closure?.fait) { const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
+      const recette = await transaction.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } });
+      if (!recette) { const error = new Error('Aucune session de recettes a cloturer pour cette caisse.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
+      const [releves, depense, retours] = await Promise.all([
+        transaction.mobVCarCaisse.findMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId } }),
+        transaction.depensesCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } }),
+        transaction.retourCuve.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } }, include: { details: true } }),
+      ]);
+      const incomplete = releves.find((releve) => releve.indexFermeture == null);
+      if (incomplete) { const error = new Error('Toutes les pompes doivent avoir un index de fermeture avant la cloture.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
+      const recetteTheorique = releves.reduce((total, releve) => total.plus(releve.indexFermeture!.minus(releve.indexOuverture).times(releve.prixVente)), new Prisma.Decimal(0));
+      const retourValeur = (retours?.details ?? []).filter((detail) => detail.valide).reduce((total, detail) => total.plus(detail.valeur), new Prisma.Decimal(0));
+      const totalCaisse = recette.totalRecettes.minus(retourValeur);
+      const totalDepenses = depense?.totalDepenses ?? new Prisma.Decimal(0);
+      const reserveFinTheorique = recette.reserveDepart.minus(recetteTheorique).minus(retourValeur);
+      const ecartRecette = totalCaisse.minus(recetteTheorique);
+      const reserveFinAttendue = recette.reserveDepart.minus(recetteTheorique).minus(retourValeur);
+      const ecartCaisse = ecartRecette;
+      const tolerance = recette.seuilTolerance;
+      if (ecartCaisse.abs().greaterThan(tolerance) && !input.forcer) { const error = new Error(`Cloture bloquee: ecart de ${ecartCaisse.toFixed(3)} TND, tolerance ${tolerance.toFixed(3)} TND.`) as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
+      const updated = await transaction.recetteCaisse.update({ where: { id: recette.id }, data: { recetteTheorique, ecartRecette, reserveFinTheorique, reserveFinAttendue, ecartCaisse, commentaireEcart: input.commentaire, validePar: input.forcer ? request.user?.id : undefined, fait: true } });
+      await transaction.joursClotures.upsert({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } }, create: { dateJour: date, equipeId: input.equipeId, fait: true }, update: { fait: true } });
+      await transaction.depensesCaisse.updateMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId }, data: { fait: true } });
+      await transaction.creditCaisse.updateMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId }, data: { fait: true } });
+      return updated;
+    });
+    response.json({ ...result, date: result.date.toISOString().slice(0, 10), totalRecettes: toNumber(result.totalRecettes), recetteTheorique: toNumber(result.recetteTheorique), ecartRecette: toNumber(result.ecartRecette), reserveFinTheorique: toNumber(result.reserveFinTheorique), reserveFinAttendue: toNumber(result.reserveFinAttendue), ecartCaisse: toNumber(result.ecartCaisse) });
   } catch (error) { next(error); }
 });
 

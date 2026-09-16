@@ -55,5 +55,5 @@ export function useAddCreditLine() {
 }
 export function useCloturerCaisse() {
   const queryClient = useQueryClient();
-  return useMutation({ mutationFn: ({ date, equipeId }: Pick<CaisseContext, 'date' | 'equipeId'>) => api.post('/caisse/cloturer', { date, equipeId }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['caisse-summary'] }) });
+  return useMutation({ mutationFn: ({ date, equipeId, caisseId }: Pick<CaisseContext, 'date' | 'equipeId' | 'caisseId'>) => api.post('/caisse/cloturer', { date, equipeId, caisseId }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['caisse-summary'] }) });
 }

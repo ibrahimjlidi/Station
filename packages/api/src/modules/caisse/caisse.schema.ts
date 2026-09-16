@@ -34,6 +34,9 @@ export const creditLineSchema = z.object({
 export const clotureSchema = z.object({
   date: dateSchema,
   equipeId: positiveId,
+  caisseId: positiveId,
+  forcer: z.boolean().default(false),
+  commentaire: z.string().trim().max(1000).optional(),
 });
 
 export const summaryParamsSchema = z.object({

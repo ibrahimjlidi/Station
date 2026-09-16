@@ -86,6 +86,14 @@ router.post('/pompes/relever', requireRole('gerant', 'caissier'), async (request
     const date = new Date(`${input.date}T00:00:00.000Z`);
     const existing = await prisma.mobVCarCaisse.findUnique({ where: { date_equipeId_caisseId_pompeId: { date, equipeId: input.equipeId, caisseId: input.caisseId, pompeId: input.pompeId } } });
     if (existing) { response.status(409).json({ message: 'Un relevé existe déjà pour cette date, cette équipe, cette caisse et cette pompe.', id: existing.id }); return; }
+    const previous = await prisma.mobVCarCaisse.findFirst({
+      where: { pompeId: input.pompeId, caisseId: input.caisseId, date: { lte: date }, indexFermeture: { not: null } },
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+    });
+    if (previous && !new Prisma.Decimal(input.indexOuverture).equals(previous.indexFermeture!)) {
+      response.status(409).json({ message: `L'index d'ouverture doit reprendre la fermeture précédente (${previous.indexFermeture}).`, expected: asNumber(previous.indexFermeture) });
+      return;
+    }
     const releve = await prisma.mobVCarCaisse.create({ data: { ...input, date, indexOuverture: new Prisma.Decimal(input.indexOuverture), prixVente: pompe.prixVente } });
     response.status(201).json({ ...releve, indexOuverture: asNumber(releve.indexOuverture), prixVente: asNumber(releve.prixVente) });
   } catch (error) { next(error); }
