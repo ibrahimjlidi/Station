@@ -2,15 +2,27 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { authMiddleware, requireRole, scopeToMagasin, type AuthRequest } from '../../middleware/auth.js';
-import { caisseSchema, cuveSchema, equipeSchema, fermerSchema, inventaireCarburantSchema, jaugeageFilterSchema, jaugeageSchema, jaugeagesSchema, pompeSchema, releverSchema, retourSchema } from './schemas.js';
+import { BUSINESS_RULES } from '../../lib/business-rules.js';
+import { emitSocketEvent } from '../../lib/socket.js';
+import { SOCKET_EVENTS } from '../../lib/socket-events.js';
+import sessionRouter from './session-router.js';
+import { caisseSchema, cuveSchema, equipeSchema, fermerSchema, fermerSessionSchema, inventaireCarburantSchema, jaugeageFilterSchema, jaugeageSchema, jaugeagesSchema, ouvrirSessionSchema, pompeSchema, releverSchema, retourSchema, suggestedOpeningSchema } from './schemas.js';
 
 const router = Router();
 router.use(authMiddleware);
+router.use('/session', sessionRouter);
 
 const asNumber = (value: Prisma.Decimal | number | null | undefined) => value == null ? null : Number(value);
+function emitCuveStock(magasinId: number | null | undefined, cuve: { id: number; libelle: string; stock: Prisma.Decimal; volumeTotal: Prisma.Decimal }) {
+  const stockActuel = Number(cuve.stock);
+  const volumeTotal = Number(cuve.volumeTotal);
+  const pourcentage = volumeTotal ? Math.max(0, Math.min(100, stockActuel / volumeTotal * 100)) : 0;
+  emitSocketEvent(magasinId, SOCKET_EVENTS.STOCK_CUVE_UPDATED, { cuveId: cuve.id, libelle: cuve.libelle, stockActuel, volumeTotal, pourcentage });
+  if (volumeTotal && stockActuel / volumeTotal < 0.2) emitSocketEvent(magasinId, SOCKET_EVENTS.ALERT_STOCK_BAS, { type: 'cuve', id: cuve.id, nom: cuve.libelle, stockActuel, pourcentage });
+}
 
 async function activeMagasinId(request: AuthRequest) {
-  const magasin = await prisma.magasin.findFirst({ where: { ...scopeToMagasin(request, { active: true }) }, orderBy: { id: 'asc' } });
+  const magasin = await prisma.magasin.findFirst({ where: { active: true, ...(request.user?.magasinId == null ? {} : { id: request.user.magasinId }) }, orderBy: { id: 'asc' } });
   if (!magasin) {
     const error = new Error('Aucun magasin actif n’est configuré.') as Error & { statusCode?: number };
     error.statusCode = 400;
@@ -107,6 +119,7 @@ router.patch('/pompes/relever/:id/fermer', requireRole('gerant', 'caissier'), as
     if (!releve) { response.status(404).json({ message: 'Releve introuvable.' }); return; }
     if (new Prisma.Decimal(input.indexFermeture).lessThan(releve.indexOuverture)) { response.status(400).json({ message: "L'index de fermeture doit etre superieur ou egal a l'ouverture." }); return; }
     const updated = await prisma.mobVCarCaisse.update({ where: { id }, data: { indexFermeture: new Prisma.Decimal(input.indexFermeture) } });
+    emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.SESSION_CLOSED, { sessionId: updated.id, date: updated.date.toISOString().slice(0, 10), equipeId: updated.equipeId, caisseId: updated.caisseId, magasinId: request.user?.magasinId ?? 0 });
     response.json({ ...updated, indexOuverture: asNumber(updated.indexOuverture), indexFermeture: asNumber(updated.indexFermeture), prixVente: asNumber(updated.prixVente), ca: Number(updated.indexFermeture!.minus(updated.indexOuverture).times(updated.prixVente)) });
   } catch (error) { next(error); }
 });
@@ -134,11 +147,12 @@ router.post('/retours', requireRole('caissier', 'gerant'), async (request, respo
     });
     const totalVolume = lines.reduce((sum, line) => sum.plus(line.volume), new Prisma.Decimal(0));
     const totalValeur = lines.reduce((sum, line) => sum.plus(line.valeur), new Prisma.Decimal(0));
-    const retour = await prisma.$transaction(async (transaction) => {
+    const { retour, cuves: updatedCuves } = await prisma.$transaction(async (transaction) => {
       const created = await transaction.retourCuve.create({ data: { date: new Date(`${input.date}T00:00:00.000Z`), equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: await activeMagasinId(request), totalVolume, totalValeur, details: { create: lines.map((line) => ({ pompeId: line.pompeId, cuveId: line.cuveId, volume: new Prisma.Decimal(line.volume), valeur: line.valeur, tauxTVA: new Prisma.Decimal(line.tauxTVA) })) } }, include: { details: true } });
-      for (const line of lines) await transaction.cuve.update({ where: { id: line.cuveId }, data: { stock: { decrement: new Prisma.Decimal(line.volume) } } });
-      return created;
+      const updated = []; for (const line of lines) updated.push(await transaction.cuve.update({ where: { id: line.cuveId }, data: { stock: { decrement: new Prisma.Decimal(line.volume) } } }));
+      return { retour: created, cuves: updated };
     });
+    updatedCuves.forEach((cuve) => emitCuveStock(request.user?.magasinId, cuve));
     response.status(201).json({ ...retour, totalVolume: asNumber(retour.totalVolume), totalValeur: asNumber(retour.totalValeur) });
   } catch (error) { next(error); }
 });
@@ -194,7 +208,8 @@ router.patch('/inventaires/:id/cloturer', requireRole('gerant'), async (request,
     const inventory = await prisma.inventaireCarburant.findFirst({ where: { id: Number(request.params.id), ...scopeToMagasin(request, {}) }, include: { lignes: true } });
     if (!inventory) { response.status(404).json({ message: 'Inventaire carburant introuvable.' }); return; }
     if (inventory.cloture) { response.status(409).json({ message: 'Inventaire deja cloture.' }); return; }
-    await prisma.$transaction(async (transaction) => { for (const line of inventory.lignes) await transaction.cuve.update({ where: { id: line.cuveId }, data: { stock: line.stockPhysique } }); await transaction.inventaireCarburant.update({ where: { id: inventory.id }, data: { cloture: true } }); });
+    const updatedCuves = await prisma.$transaction(async (transaction) => { const cuves = []; for (const line of inventory.lignes) cuves.push(await transaction.cuve.update({ where: { id: line.cuveId }, data: { stock: line.stockPhysique } })); await transaction.inventaireCarburant.update({ where: { id: inventory.id }, data: { cloture: true } }); return cuves; });
+    updatedCuves.forEach((cuve) => emitCuveStock(request.user?.magasinId, cuve));
     response.json({ id: inventory.id, cloture: true });
   } catch (error) { next(error); }
 });
@@ -206,6 +221,8 @@ router.post('/jaugeages', requireRole('caissier', 'gerant'), async (request, res
     const caisse = input.caisseId ?? (await prisma.caisse.findFirst({ where: scopeToMagasin(request, { actif: true }), orderBy: { id: 'asc' } }))?.id;
     if (!team || !caisse) { response.status(400).json({ message: 'Une equipe et une caisse sont requises.' }); return; }
     const row = await prisma.jaugeage.create({ data: { date: new Date(`${input.date}T00:00:00.000Z`), cuveId: input.cuveId, equipeId: team, caisseId: caisse, niveau: new Prisma.Decimal(input.quantite), quantite: new Prisma.Decimal(input.quantite) }, include: { cuve: true } });
+    const ecart = Number(row.quantite.minus(row.cuve.stock));
+    if (Math.abs(ecart) > 100) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ALERT_ECART_JAUGEAGE, { cuveId: row.cuveId, libelle: row.cuve.libelle, stockTheorique: Number(row.cuve.stock), stockPhysique: Number(row.quantite), ecart, date: row.date.toISOString().slice(0, 10) });
     response.status(201).json({ ...row, niveau: asNumber(row.niveau), quantite: asNumber(row.quantite), ecart: asNumber(row.quantite.minus(row.cuve.stock)) });
   } catch (error) { next(error); }
 });

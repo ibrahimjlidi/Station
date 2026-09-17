@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { emitSocketEvent } from '../../lib/socket.js';
+import { SOCKET_EVENTS } from '../../lib/socket-events.js';
 import { bonLivraisonSchema, clientSchema, listFilterSchema, reglementSchema } from './clients.schema.js';
 
 const router = Router();
@@ -93,10 +95,11 @@ router.post('/reglements', ...commercialAccess, async (request, response, next) 
     const input = reglementSchema.parse(request.body);
     const result = await prisma.$transaction(async (transaction) => {
       const reglement = await transaction.detailReglements.create({ data: { clientId: input.clientId, equipeId: input.equipeId, caisseId: input.caisseId, date: toDate(input.date), montant: new Prisma.Decimal(input.montant), modePayment: input.modePayment, echeance: input.echeance ? toDate(input.echeance) : undefined, impaye: input.impaye, valide: input.valide } });
-      if (input.impaye || input.echeance) await transaction.impayes.create({ data: { numReg: reglement.id, clientId: input.clientId, dateReg: toDate(input.date), montantLigne: new Prisma.Decimal(input.montant), echeance: input.echeance ? toDate(input.echeance) : undefined, numCheque: input.numCheque, numRib: input.numRib, nomBanque: input.nomBanque, impaye: input.impaye, valide: input.valide } });
-      return reglement;
+      const impaye = input.impaye || input.echeance ? await transaction.impayes.create({ data: { numReg: reglement.id, clientId: input.clientId, dateReg: toDate(input.date), montantLigne: new Prisma.Decimal(input.montant), echeance: input.echeance ? toDate(input.echeance) : undefined, numCheque: input.numCheque, numRib: input.numRib, nomBanque: input.nomBanque, impaye: input.impaye, valide: input.valide } }) : null;
+      return { reglement, impaye };
     });
-    response.status(201).json({ ...result, montant: numberValue(result.montant) });
+    if (result.impaye) { const client = await prisma.client.findUnique({ where: { id: result.impaye.clientId }, select: { nomClient: true } }); if (client) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ALERT_IMPAYE, { clientId: result.impaye.clientId, nomClient: client.nomClient, montant: Number(result.impaye.montantLigne), echeance: result.impaye.echeance?.toISOString().slice(0, 10) ?? null }); }
+    response.status(201).json({ ...result.reglement, montant: numberValue(result.reglement.montant) });
   } catch (error) { next(error); }
 });
 

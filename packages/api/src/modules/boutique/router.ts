@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
+import { emitSocketEvent } from '../../lib/socket.js';
+import { SOCKET_EVENTS } from '../../lib/socket-events.js';
 import { achatSchema, familleSchema, filterSchema, inventSchema, produitSchema, transfertSchema } from './boutique.schema.js';
 
 const router = Router();
@@ -21,7 +23,7 @@ router.post('/produits', ...manager, async (request, response, next) => {
 });
 
 router.put('/produits/:id', ...manager, async (request, response, next) => {
-  try { const input = produitSchema.partial().parse(request.body); const product = await prisma.produit.update({ where: { id: Number(request.params.id) }, data: { ...input, ...(input.prixAchatHT === undefined ? {} : { prixAchatHT: new Prisma.Decimal(input.prixAchatHT) }), ...(input.prixVenteHT === undefined ? {} : { prixVenteHT: new Prisma.Decimal(input.prixVenteHT) }), ...(input.tauxTVA === undefined ? {} : { tva: new Prisma.Decimal(input.tauxTVA), tauxTVA: new Prisma.Decimal(input.tauxTVA) }), ...(input.stock === undefined ? {} : { stock: new Prisma.Decimal(input.stock) }) } }); response.json({ ...product, stock: numberValue(product.stock) }); } catch (error) { next(error); }
+  try { const input = produitSchema.partial().parse(request.body); const product = await prisma.produit.update({ where: { id: Number(request.params.id) }, data: { ...input, ...(input.prixAchatHT === undefined ? {} : { prixAchatHT: new Prisma.Decimal(input.prixAchatHT) }), ...(input.prixVenteHT === undefined ? {} : { prixVenteHT: new Prisma.Decimal(input.prixVenteHT) }), ...(input.tauxTVA === undefined ? {} : { tva: new Prisma.Decimal(input.tauxTVA), tauxTVA: new Prisma.Decimal(input.tauxTVA) }), ...(input.stock === undefined ? {} : { stock: new Prisma.Decimal(input.stock) }) } }); if (input.stock !== undefined) { const stockActuel = Number(product.stock); emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.STOCK_PRODUIT_UPDATED, { produitId: product.id, libelle: product.libelle, stockActuel }); if (stockActuel <= 5) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ALERT_STOCK_BAS, { type: 'produit', id: product.id, nom: product.libelle, stockActuel }); } response.json({ ...product, stock: numberValue(product.stock) }); } catch (error) { next(error); }
 });
 
 router.get('/familles-produits', ...read, async (_request, response, next) => {
@@ -42,10 +44,12 @@ router.post('/achats-produits', ...cashier, async (request, response, next) => {
     const totalTTC = input.lignes.reduce((sum, line) => sum + line.quantite * line.prixAchat * (1 + line.tauxTVA / 100), 0);
     const purchase = await prisma.$transaction(async (transaction) => {
       const created = await transaction.achatProd.create({ data: { magasinId: request.user?.magasinId, fournisseurId: input.fournisseurId, dateAchat: toDate(input.dateAchat), dateFacture: input.dateFacture ? toDate(input.dateFacture) : undefined, numFacture: input.numFacture, totalTTC: new Prisma.Decimal(totalTTC), totHT: new Prisma.Decimal(totalHT), valide: input.valide, details: { create: input.lignes.map((line) => ({ produitId: line.produitId, date: toDate(input.dateAchat), quantite: new Prisma.Decimal(line.quantite), prixAchat: new Prisma.Decimal(line.prixAchat), tauxTVA: new Prisma.Decimal(line.tauxTVA), valide: input.valide })) } }, include: { details: true } });
-      for (const line of input.lignes) await transaction.produit.update({ where: { id: line.produitId }, data: { stock: { increment: new Prisma.Decimal(line.quantite) }, prixAchatHT: new Prisma.Decimal(line.prixAchat) } });
-      return created;
+      const updatedProducts = []; for (const line of input.lignes) updatedProducts.push(await transaction.produit.update({ where: { id: line.produitId }, data: { stock: { increment: new Prisma.Decimal(line.quantite) }, prixAchatHT: new Prisma.Decimal(line.prixAchat) } }));
+      return { purchase: created, products: updatedProducts };
     });
-    response.status(201).json({ ...purchase, totalTTC: numberValue(purchase.totalTTC), totHT: numberValue(purchase.totHT) });
+    for (const product of purchase.products) { const stockActuel = Number(product.stock); emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.STOCK_PRODUIT_UPDATED, { produitId: product.id, libelle: product.libelle, stockActuel }); if (stockActuel <= 5) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ALERT_STOCK_BAS, { type: 'produit', id: product.id, nom: product.libelle, stockActuel }); }
+    if (input.valide) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ACHAT_PRODUIT_VALIDATED, { achatId: purchase.purchase.id, produits: purchase.products.map((product) => ({ produitId: product.id, newStock: Number(product.stock) })) });
+    response.status(201).json({ ...purchase.purchase, totalTTC: numberValue(purchase.purchase.totalTTC), totHT: numberValue(purchase.purchase.totHT) });
   } catch (error) { next(error); }
 });
 

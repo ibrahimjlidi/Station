@@ -18,6 +18,7 @@ Station El Amal est une application ERP full-stack pour gérer une station-servi
 - [Environment Variables](#environment-variables)
 - [User Roles](#user-roles)
 - [API Overview](#api-overview)
+- [Shift Workflow Cheat Sheet](docs/shift-workflow-cheatsheet.md)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -280,12 +281,14 @@ docker compose down
 | `JWT_SECRET` | Secret de signature JWT. | `a8f3...` | Oui |
 | `PORT` | Port d'écoute de l'API. | `4000` | Non |
 | `CORS_ORIGIN` | Origines frontend autorisées. | `http://localhost:5173` | Non |
+| `FRONTEND_URL` | Origine autorisée par Socket.IO. | `http://localhost:5173` | Non |
 
 ### `packages/web/.env`
 
 | Variable | Description | Exemple | Requise |
 |---|---|---|---|
 | `VITE_API_URL` | URL de base de l'API. | `http://localhost:4000` | Non |
+| `VITE_SOCKET_URL` | URL de Socket.IO, conservée avec l'URL de l'API. | `http://localhost:4000` | Non |
 
 ## User Roles
 
@@ -309,6 +312,26 @@ Toutes les routes métier nécessitent un jeton Bearer, sauf `/health` et l'auth
 | PUT | `/users/:id` | Modifie un utilisateur. |
 | PATCH | `/users/:id/reset-password` | Réinitialise un mot de passe. |
 
+## Real-time events
+
+Le serveur Socket.IO est disponible sur l'URL de l'API. La connexion doit fournir le même JWT que l'API REST dans `socket.handshake.auth.token`. Après vérification, le socket rejoint la salle `magasin:{magasinId}` et ne reçoit que les événements de son magasin.
+
+| Constante | Événement | Description |
+|---|---|---|
+| `STOCK_CUVE_UPDATED` | `stock:cuve:updated` | Stock d'une cuve mis à jour. |
+| `STOCK_PRODUIT_UPDATED` | `stock:produit:updated` | Stock d'un produit boutique mis à jour. |
+| `SESSION_OPENED` | `session:opened` | Session de caisse ouverte. |
+| `SESSION_CLOSED` | `session:closed` | Session de caisse fermée. |
+| `CLOTURE_DONE` | `cloture:done` | Journée clôturée et données verrouillées. |
+| `RECETTE_ADDED` | `recette:added` | Ligne de recette ajoutée. |
+| `DEPENSE_ADDED` | `depense:added` | Ligne de dépense ajoutée. |
+| `CREDIT_ADDED` | `credit:added` | Ligne de crédit client ajoutée. |
+| `ACHAT_CARBURANT_VALIDATED` | `achat:carburant:validated` | Achat carburant validé et cuves mises à jour. |
+| `ACHAT_PRODUIT_VALIDATED` | `achat:produit:validated` | Achat boutique validé et stocks mis à jour. |
+| `ALERT_STOCK_BAS` | `alert:stock:bas` | Stock d'une cuve ou d'un produit sous le seuil. |
+| `ALERT_ECART_JAUGEAGE` | `alert:ecart:jaugeage` | Écart physique/théorique de jaugeage supérieur à 100 litres. |
+| `ALERT_IMPAYE` | `alert:impaye` | Nouvel impayé client enregistré. |
+
 ### Carburant
 
 | Méthode | Route | Description |
@@ -321,6 +344,7 @@ Toutes les routes métier nécessitent un jeton Bearer, sauf `/health` et l'auth
 | POST | `/pompes/relever` | Ouvre un relevé. |
 | PATCH | `/pompes/relever/:id/fermer` | Ferme un relevé. |
 | GET | `/cuves/stock` | Calcule le stock des cuves. |
+| POST | `/achats-carburant` | Crée un achat carburant et, s'il est validé, alimente les cuves. |
 
 ### Caisse
 

@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../../../lib/axios';
+import { useRealtimeQuery } from '../../../hooks/useRealtimeQuery';
+import { SOCKET_EVENTS } from '../../../lib/socket-events';
 
 export interface Famille { id: number; libelle: string; }
 export interface Produit { id: number; code: string; codeProduit?: string; libelle: string; familleId?: number; famille?: Famille; prixAchatHT: number; prixVenteHT: number; tauxTVA: number; stock: number; }
@@ -7,7 +9,7 @@ export interface Fournisseur { id: number; raisonSociale: string; }
 export interface Inventaire { id: number; date: string; operateurNom: string; valeurStock: number; cloture: boolean; }
 export interface SalesSummary { totalCA: number; totalMarge: number; nombreVentes: number; margePourcentage: number; parFamille: Array<{ famille: string; ca: number }>; }
 
-export function useProduits(familleId?: number) { return useQuery({ queryKey: ['boutique-produits', familleId], queryFn: async () => (await api.get<Produit[]>('/produits', { params: { familleId } })).data }); }
+export function useProduits(familleId?: number) { return useRealtimeQuery({ queryKey: ['boutique-produits', familleId], queryFn: async () => (await api.get<Produit[]>('/produits', { params: { familleId } })).data, invalidateOn: [SOCKET_EVENTS.STOCK_PRODUIT_UPDATED, SOCKET_EVENTS.ACHAT_PRODUIT_VALIDATED] }); }
 export function useFamillesProduits() { return useQuery({ queryKey: ['familles-produits'], queryFn: async () => (await api.get<Famille[]>('/familles-produits')).data }); }
 export function useFournisseurs() { return useQuery({ queryKey: ['boutique-fournisseurs'], queryFn: async () => (await api.get<Fournisseur[]>('/fournisseurs')).data }); }
 export function useInventaires() { return useQuery({ queryKey: ['inventaires'], queryFn: async () => (await api.get<Inventaire[]>('/inventaires')).data }); }

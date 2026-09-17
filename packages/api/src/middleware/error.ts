@@ -10,5 +10,5 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, _ne
   const status = typeof error?.statusCode === 'number' ? error.statusCode : 500;
   const message = error instanceof Error ? error.message : 'Erreur interne du serveur.';
   console.error(error);
-  response.status(status).json({ message });
+  response.status(status).json({ error: typeof error?.code === 'string' ? error.code : undefined, message });
 };

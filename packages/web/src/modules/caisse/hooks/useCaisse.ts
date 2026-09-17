@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../../../lib/axios';
+import { useRealtimeQuery } from '../../../hooks/useRealtimeQuery';
+import { SOCKET_EVENTS } from '../../../lib/socket-events';
 
 export interface CaisseContext { date: string; equipeId: number; caisseId: number; vendeurId: number; }
 export interface ModePayment { id: number; libelle: string; famille?: string; compteCPT?: string; }
@@ -18,6 +20,11 @@ export interface CaisseSummary {
   depenses: Array<{ id: number; codeDepense: number; montant: number; libelle?: string; type: TypeDepense; }>;
   credits: Array<{ id: number; clientId: number; montant: number; libelle?: string; modePayment?: string; client: Pick<Client, 'id' | 'nomClient'>; }>;
   breakdown: Array<{ modePaymentId: number; libelle: string; montant: number }>;
+  sessionStatut?: string;
+  fondsCaisseOuverture?: number;
+  recettesTotaux?: { totalEspeces: number; totalCheques: number; totalCarte: number; totalCredits: number; totalDeclaree: number };
+  theorique?: { carburant: number; boutique: number; credits: number; total: number };
+  ecartProvisoire?: number;
 }
 
 const hasContext = (context?: Partial<CaisseContext>) => Boolean(context?.date && context.equipeId && context.caisseId);
@@ -26,8 +33,9 @@ export function useModesPayment() { return useQuery({ queryKey: ['caisse-modes-p
 export function useTypesDepenses() { return useQuery({ queryKey: ['caisse-types-depenses'], queryFn: async () => (await api.get<TypeDepense[]>('/caisse/types-depenses')).data }); }
 export function useClients() { return useQuery({ queryKey: ['caisse-clients'], queryFn: async () => (await api.get<Client[]>('/caisse/clients')).data }); }
 export function useCaisseSummary(context?: Partial<CaisseContext>) {
-  return useQuery({ queryKey: ['caisse-summary', context?.date, context?.equipeId, context?.caisseId], queryFn: async () => (await api.get<CaisseSummary>(`/caisse/resume/${context!.date}/${context!.equipeId}/${context!.caisseId}`)).data, enabled: hasContext(context) });
+  return useRealtimeQuery({ queryKey: ['caisse-summary', context?.date, context?.equipeId, context?.caisseId], queryFn: async () => (await api.get<CaisseSummary>(`/caisse/resume/${context!.date}/${context!.equipeId}/${context!.caisseId}`)).data, enabled: hasContext(context), invalidateOn: [SOCKET_EVENTS.RECETTE_ADDED, SOCKET_EVENTS.DEPENSE_ADDED, SOCKET_EVENTS.CREDIT_ADDED, SOCKET_EVENTS.SESSION_CLOSED] });
 }
+export function useClotures() { return useRealtimeQuery({ queryKey: ['clotures'], queryFn: async () => (await api.get('/caisse/clotures')).data, invalidateOn: [SOCKET_EVENTS.CLOTURE_DONE] }); }
 
 export function useCreateRecette() {
   const queryClient = useQueryClient();

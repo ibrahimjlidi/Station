@@ -86,7 +86,7 @@ async function main() {
 
   const station = await prisma.station.create({ data: { code: 'EL-AMAL', nom: 'Station El Amal' } });
   await prisma.magasin.create({ data: { stationId: station.id, code: 'MAG-PRINCIPAL', nom: 'Magasin principal' } });
-  await prisma.setParam.create({ data: { id: 1, stationId: station.id, nomStation: 'Station El Amal', adresse: 'Avenue Habib Bourguiba, Tunis', tel: '71 000 000', mf: '1234567/A/M/000', rc: 'B123456789', devise: 'TND', tauxTVADefaut: 19, timbre: 0.6 } });
+  await prisma.setParam.create({ data: { id: 1, stationId: station.id, nomStation: 'Station El Amal', adresse: 'Avenue Habib Bourguiba, Tunis', tel: '71 000 000', mf: '1234567/A/M/000', rc: 'B123456789', devise: 'TND', tauxTVADefaut: 19, timbre: 0.6, seuilEcartAutoApprove: 0.5, seuilEcartGerantApprove: 5, seuilEcartBloque: 20, fondsCaisseDefaut: 200, seuilAlerteCuve: 0.2, seuilJaugeageAlerte: 100 } });
   await prisma.compteur.create({ data: { id: 1 } });
 
   const magasin = await prisma.magasin.findFirstOrThrow({ where: { stationId: station.id } });
@@ -96,19 +96,21 @@ async function main() {
     nuit: await prisma.equipe.create({ data: { magasinId: magasin.id, code: 'NUIT', libelle: 'Nuit (22:00-06:00)' } }),
   };
   const caisses = {
-    principale: await prisma.caisse.create({ data: { magasinId: magasin.id, code: 'CP', libelle: 'Caisse Principale' } }),
-    secondaire: await prisma.caisse.create({ data: { magasinId: magasin.id, code: 'CS', libelle: 'Caisse Secondaire' } }),
+    principale: await prisma.caisse.create({ data: { magasinId: magasin.id, code: 'CP', libelle: 'Caisse Piste Principale', type: 'PISTE' } }),
+    secondaire: await prisma.caisse.create({ data: { magasinId: magasin.id, code: 'CS', libelle: 'Caisse POS Boutique', type: 'POS' } }),
   };
-  await prisma.famillePayment.create({ data: { libFamille: 'Espèces', compteCPT: '531000' } });
-  await prisma.famillePayment.create({ data: { libFamille: 'Effets', compteCPT: '532000' } });
-  await prisma.famillePayment.create({ data: { libFamille: 'Cartes', compteCPT: '533000' } });
-  await prisma.famillePayment.create({ data: { libFamille: 'Créances', compteCPT: '411000' } });
+  const famillesPayment = {
+    especes: await prisma.famillePayment.create({ data: { libFamille: 'Espèces', compteCPT: '531000' } }),
+    effets: await prisma.famillePayment.create({ data: { libFamille: 'Effets', compteCPT: '532000' } }),
+    cartes: await prisma.famillePayment.create({ data: { libFamille: 'Cartes', compteCPT: '533000' } }),
+    creances: await prisma.famillePayment.create({ data: { libFamille: 'Créances', compteCPT: '411000' } }),
+  };
   const modes = {
-    especes: await prisma.modePayment.create({ data: { libelle: 'Espèces', famille: '1', compteCPT: '531000' } }),
-    cheque: await prisma.modePayment.create({ data: { libelle: 'Chèque', famille: '2', compteCPT: '532000' } }),
-    virement: await prisma.modePayment.create({ data: { libelle: 'Virement', famille: '2', compteCPT: '532100' } }),
-    carte: await prisma.modePayment.create({ data: { libelle: 'Carte bancaire', famille: '3', compteCPT: '533000' } }),
-    credit: await prisma.modePayment.create({ data: { libelle: 'Crédit client', famille: '4', compteCPT: '411000' } }),
+    especes: await prisma.modePayment.create({ data: { libelle: 'Espèces', famille: '1', famillePaymentId: famillesPayment.especes.id, compteCPT: '531000' } }),
+    cheque: await prisma.modePayment.create({ data: { libelle: 'Chèque', famille: '2', famillePaymentId: famillesPayment.effets.id, compteCPT: '532000' } }),
+    virement: await prisma.modePayment.create({ data: { libelle: 'Virement', famille: '2', famillePaymentId: famillesPayment.effets.id, compteCPT: '532100' } }),
+    carte: await prisma.modePayment.create({ data: { libelle: 'Carte bancaire', famille: '3', famillePaymentId: famillesPayment.cartes.id, compteCPT: '533000' } }),
+    credit: await prisma.modePayment.create({ data: { libelle: 'Crédit client', famille: '4', famillePaymentId: famillesPayment.creances.id, compteCPT: '411000' } }),
   };
   const famillesProduit = {
     lubrifiants: await prisma.familleProduit.create({ data: { libelle: 'Lubrifiants', compteCPT: '707100', compteACH: '607100' } }),
@@ -264,8 +266,10 @@ async function main() {
   const boutiqueProducts = Object.values(products);
   for (let daysAgo = 6; daysAgo >= 0; daysAgo -= 1) {
     const date = dateAt(daysAgo);
-    for (const [shiftIndex, equipe] of [equipes.matin, equipes.apresMidi].entries()) {
+    for (const [shiftIndex, equipe] of (daysAgo === 0 ? [equipes.matin] : [equipes.matin, equipes.apresMidi]).entries()) {
       const vendeur = shiftIndex === 0 ? vendeurs.fatma : vendeurs.khaled;
+      const heureOuverture = new Date(date); heureOuverture.setUTCHours(6 + shiftIndex * 8, 2, 0, 0);
+      const heureFermeture = daysAgo === 0 ? undefined : new Date(date); if (heureFermeture) heureFermeture.setUTCHours(14 + shiftIndex * 8, 5, 0, 0);
       let fuelRevenue = 0;
       for (const [pumpNumber, pump] of pompes.entries()) {
         const opening = pumpCounters.get(pump.id)!;
@@ -274,7 +278,7 @@ async function main() {
         pumpCounters.set(pump.id, closing);
         const fuelInfo = Object.values(fuel).find((item) => item.cuve.id === pump.cuveId)!;
         fuelRevenue += volume * Number(pump.prixVente);
-        await prisma.mobVCarCaisse.create({ data: { date, equipeId: equipe.id, caisseId: caisses.principale.id, pompeId: pump.id, vendeurId: vendeur.id, indexOuverture: opening, indexFermeture: daysAgo === 0 ? undefined : closing, prixVente: pump.prixVente } });
+        await prisma.mobVCarCaisse.create({ data: { date, equipeId: equipe.id, caisseId: caisses.principale.id, pompeId: pump.id, vendeurId: vendeur.id, cuveId: pump.cuveId, indexOuverture: opening, indexFermeture: daysAgo === 0 ? undefined : closing, prixVente: pump.prixVente, statut: daysAgo === 0 ? 'OUVERT' : 'FERME', heureOuverture, heureFermeture } });
         const fuelProduct = fuelProductByCuve.get(pump.cuveId)!;
         await prisma.carProdSiege.create({ data: { produitId: fuelProduct.id, date, equipeId: equipe.id, caisseId: caisses.principale.id, vendeurId: vendeur.id, numVente: daysAgo * 10 + shiftIndex, prixAchatHT: fuelInfo.achat, prixVenteHT: fuelInfo.vente, prixVenteTTC: lineTotal(1, fuelInfo.vente, 18), prixAchatTTC: lineTotal(1, fuelInfo.achat, 18), quantite: volume, tva: 18, marge: money((fuelInfo.vente - fuelInfo.achat) * volume), typeCarburant: fuelInfo.type, pompeId: pump.id, numLigne: pumpNumber + 1 } });
       }
@@ -282,7 +286,7 @@ async function main() {
       const creditRevenue = shiftIndex === 0 ? 550 : 0;
       const cardRevenue = money(fuelRevenue * 0.2);
       const cashRevenue = money(fuelRevenue - cardRevenue - creditRevenue);
-      const recette = await prisma.recetteCaisse.create({ data: { date, equipeId: equipe.id, caisseId: caisses.principale.id, vendeurId: vendeur.id, totalRecettes: fuelRevenue, fait: daysAgo !== 0 } });
+      const recette = await prisma.recetteCaisse.create({ data: { date, equipeId: equipe.id, caisseId: caisses.principale.id, vendeurId: vendeur.id, totalRecettes: fuelRevenue, totalEspeces: cashRevenue, totalCarte: cardRevenue, fondsCaisseOuverture: 200, fondsCaisseFermeture: daysAgo === 0 ? undefined : 200, depotBanque: daysAgo === 0 ? undefined : cashRevenue - 200, fait: daysAgo !== 0, statut: daysAgo === 0 ? 'OUVERT' : 'FERME', heureOuverture, heureFermeture } });
       await prisma.detailRecetteCaisse.create({ data: { numRecette: recette.id, modePaymentId: modes.especes.id, montant: cashRevenue } });
       await prisma.detailRecetteCaisse.create({ data: { numRecette: recette.id, modePaymentId: modes.carte.id, montant: cardRevenue } });
       await prisma.detailRecetteCaisse.create({ data: { numRecette: recette.id, modePaymentId: modes.credit.id, montant: creditRevenue } });

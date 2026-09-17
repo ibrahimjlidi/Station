@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import api from './axios';
+import { connectSocket, disconnectSocket } from './socket';
 
 export type Role = 'gerant' | 'caissier' | 'vendeur';
 export interface AuthUser { id: number; username: string; nom: string; prenom: string; telephone?: string; role: Role; actif: boolean; lastLoginAt?: string | null; }
@@ -21,8 +22,9 @@ export const useAuthStore = create<AuthState>()(persist((set) => ({
     const { data } = await api.post<{ token: string; user: AuthUser }>('/auth/login', { username, password });
     const payload = decodeJwtPayload(data.token);
     set({ token: data.token, user: data.user, magasinId: payload.magasinId ?? null });
+    connectSocket(data.token);
   },
-  logout: () => set({ token: null, user: null, magasinId: null }),
+  logout: () => { disconnectSocket(); set({ token: null, user: null, magasinId: null }); },
 }), { name: 'station-auth' }));
 
 export function useMagasinId() {

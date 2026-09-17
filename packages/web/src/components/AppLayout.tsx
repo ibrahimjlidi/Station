@@ -4,12 +4,15 @@ import { Button, Layout, Menu, Tag, Typography } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../lib/auth';
 import { canAccess, permissionForPath } from '../lib/permissions';
+import { useSocket } from '../hooks/useSocket';
+import { LiveIndicator } from '../modules/dashboard/components/LiveIndicator';
 
 const { Header, Sider, Content } = Layout;
 const items = [
   { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
-  { key: 'carburant-section', icon: <DollarOutlined />, label: 'Carburant', children: [{ key: '/carburant/releves', label: 'Relevés pompes' }, { key: '/carburant/stock', label: 'Stock cuves' }, { key: '/carburant/retours', label: 'Retours cuve' }, { key: '/carburant/inventaires', label: 'Inventaires carburant' }, { key: '/carburant/jaugeages', label: 'Jaugeages' }] },
+  { key: 'carburant-section', icon: <DollarOutlined />, label: 'Carburant', children: [{ key: '/carburant/releves', label: 'Relevés pompes' }, { key: '/carburant/releves?mode=status', label: 'État des sessions' }, { key: '/carburant/stock', label: 'Stock cuves' }, { key: '/carburant/retours', label: 'Retours cuve' }, { key: '/carburant/inventaires', label: 'Inventaires carburant' }, { key: '/carburant/jaugeages', label: 'Jaugeages' }] },
   { key: '/boutique', icon: <ShopOutlined />, label: 'Boutique', children: [{ key: '/boutique/produits', label: 'Produits' }, { key: '/boutique/achats', label: 'Achats produits' }, { key: '/boutique/inventaire', label: 'Inventaire' }, { key: '/boutique/ventes', label: 'Résumé des ventes' }] },
+  { key: '/pos', icon: <DollarOutlined />, label: 'Caisse POS' },
   { key: '/caisse', icon: <InboxOutlined />, label: 'Caisse', children: [{ key: '/caisse/saisie', label: 'Saisie de caisse' }, { key: '/caisse/cloture', label: 'Clôture de caisse' }] },
   { key: 'clients-section', icon: <FileTextOutlined />, label: 'Clients & facturation', children: [{ key: '/clients', label: 'Liste des clients' }, { key: '/clients/bl', label: 'Nouveau bon de livraison' }, { key: '/clients/factures', label: 'Factures' }, { key: '/clients/impayes', label: 'Impayés' }] },
   { key: 'fournisseurs-section', icon: <AppstoreOutlined />, label: 'Fournisseurs', children: [{ key: '/fournisseurs', label: 'Liste fournisseurs' }, { key: '/fournisseurs/reglements', label: 'Règlements' }, { key: '/fournisseurs/retenues', label: 'Retenues à la source' }, { key: '/fournisseurs/avoirs', label: 'Avoirs fournisseurs' }] },
@@ -21,6 +24,7 @@ const items = [
 ];
 
 export function AppLayout() {
+  useSocket();
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
@@ -41,7 +45,7 @@ export function AppLayout() {
     <Layout>
       <Header className="topbar">
         <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(!collapsed)} />
-        <div className="user-area"><Button type="text" onClick={() => navigate('/mon-compte')}>{user?.prenom} {user?.nom}</Button><Button type="text" icon={<LogoutOutlined />} onClick={logout}>Déconnexion</Button></div>
+        <div className="user-area"><LiveIndicator /><Button type="text" onClick={() => navigate('/mon-compte')}>{user?.prenom} {user?.nom}</Button><Button type="text" icon={<LogoutOutlined />} onClick={logout}>Déconnexion</Button></div>
       </Header>
       <Content className="page-content"><Outlet /></Content>
     </Layout>

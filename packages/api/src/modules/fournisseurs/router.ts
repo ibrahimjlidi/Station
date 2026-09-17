@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
+import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
+import { emitSocketEvent } from '../../lib/socket.js';
+import { SOCKET_EVENTS } from '../../lib/socket-events.js';
 import { avoirSchema, fournisseurSchema, imputationSchema, listFilterSchema, reglementFournisseurSchema, retenueSourceSchema } from './fournisseurs.schema.js';
 
 const router = Router();
@@ -11,6 +14,7 @@ const paymentAccess = [requireAuth, requireRole('caissier', 'gerant')];
 const toDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
 const numberValue = (value: Prisma.Decimal | number | null | undefined) => value == null ? null : Number(value);
 const dateFilter = (dateFrom?: string, dateTo?: string) => ({ ...(dateFrom || dateTo ? { gte: dateFrom ? toDate(dateFrom) : undefined, lte: dateTo ? toDate(dateTo) : undefined } : {}) });
+const achatCarburantSchema = z.object({ date: z.string(), fournisseurId: z.number().int(), reference: z.string().optional(), valide: z.boolean(), lignes: z.array(z.object({ cuveId: z.number().int(), quantite: z.number().positive(), prixUnitaire: z.number().nonnegative() })).min(1) });
 
 router.get('/fournisseurs', ...readAccess, async (_request, response, next) => {
   try {
@@ -29,6 +33,22 @@ router.put('/fournisseurs/:id', ...managerAccess, async (request, response, next
 
 router.get('/achats', ...readAccess, async (request, response, next) => {
   try { const fournisseurId = request.query.fournisseurId ? Number(request.query.fournisseurId) : undefined; const achats = await prisma.achatEssence.findMany({ where: { fournisseurId }, include: { details: true }, orderBy: { date: 'desc' } }); response.json(achats.map((achat) => ({ ...achat, details: achat.details.map((detail) => ({ ...detail, quantite: numberValue(detail.quantite), prixUnitaire: numberValue(detail.prixUnitaire) })) }))); } catch (error) { next(error); }
+});
+
+router.post('/achats-carburant', ...paymentAccess, async (request, response, next) => {
+  try {
+    const input = achatCarburantSchema.parse(request.body);
+    const cuves = await prisma.cuve.findMany({ where: { id: { in: input.lignes.map((line) => line.cuveId) }, ...scopeToMagasin(request, {}) } });
+    if (cuves.length !== new Set(input.lignes.map((line) => line.cuveId)).size) { response.status(400).json({ message: 'Une cuve est introuvable ou hors magasin.' }); return; }
+    const { purchase, updatedCuves } = await prisma.$transaction(async (transaction) => {
+      const created = await transaction.achatEssence.create({ data: { magasinId: request.user?.magasinId, date: toDate(input.date), fournisseurId: input.fournisseurId, reference: input.reference, details: { create: input.lignes.map((line) => ({ cuveId: line.cuveId, quantite: new Prisma.Decimal(line.quantite), prixUnitaire: new Prisma.Decimal(line.prixUnitaire) })) } }, include: { details: true } });
+      const updated = input.valide ? await Promise.all(input.lignes.map((line) => transaction.cuve.update({ where: { id: line.cuveId }, data: { stock: { increment: new Prisma.Decimal(line.quantite) } } }))) : [];
+      return { purchase: created, updatedCuves: updated };
+    });
+    for (const cuve of updatedCuves) { const stockActuel = Number(cuve.stock); const volumeTotal = Number(cuve.volumeTotal); const pourcentage = volumeTotal ? Math.max(0, Math.min(100, stockActuel / volumeTotal * 100)) : 0; emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.STOCK_CUVE_UPDATED, { cuveId: cuve.id, libelle: cuve.libelle, stockActuel, volumeTotal, pourcentage }); if (volumeTotal && stockActuel / volumeTotal < 0.2) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ALERT_STOCK_BAS, { type: 'cuve', id: cuve.id, nom: cuve.libelle, stockActuel, pourcentage }); }
+    if (input.valide) emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.ACHAT_CARBURANT_VALIDATED, { achatId: purchase.id, cuves: updatedCuves.map((cuve) => ({ cuveId: cuve.id, newStock: Number(cuve.stock) })) });
+    response.status(201).json({ ...purchase, details: purchase.details.map((detail) => ({ ...detail, quantite: numberValue(detail.quantite), prixUnitaire: numberValue(detail.prixUnitaire) })) });
+  } catch (error) { next(error); }
 });
 
 router.post('/reglements-fournisseurs', ...paymentAccess, async (request, response, next) => {

@@ -2,6 +2,9 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
+import { BUSINESS_RULES } from '../../lib/business-rules.js';
+import { emitSocketEvent } from '../../lib/socket.js';
+import { SOCKET_EVENTS } from '../../lib/socket-events.js';
 import { clotureSchema, creditLineSchema, depenseLineSchema, recetteLineSchema, sessionSchema, summaryParamsSchema, type SessionInput } from './caisse.schema.js';
 
 const router = Router();
@@ -13,8 +16,9 @@ const toNumber = (value: Prisma.Decimal | number | null | undefined) => value ==
 async function ensureOpen(date: Date, equipeId: number) {
   const closure = await prisma.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId } } });
   if (closure?.fait) {
-    const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number };
-    error.statusCode = 409;
+    const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number; code?: string };
+    error.statusCode = 403;
+    error.code = 'SESSION_FERMEE';
     throw error;
   }
 }
@@ -25,8 +29,8 @@ async function ensureSessionReferences(input: SessionInput) {
     prisma.caisse.findUnique({ where: { id: input.caisseId } }),
     prisma.vendeur.findUnique({ where: { id: input.vendeurId } }),
   ]);
-  if (!equipe || !equipe.actif || !caisse || !caisse.actif || !vendeur || !vendeur.actif) {
-    const error = new Error('Equipe, caisse ou vendeur invalide/inactif.') as Error & { statusCode?: number };
+  if (!equipe || !equipe.actif || !caisse || !caisse.actif || caisse.type !== 'PISTE' || !vendeur || !vendeur.actif) {
+    const error = new Error('Equipe, caisse PISTE ou vendeur invalide/inactif.') as Error & { statusCode?: number };
     error.statusCode = 400;
     throw error;
   }
@@ -67,11 +71,12 @@ router.post('/recettes/:id/lignes', ...caisseAccess, async (request, response, n
     if (!recette) { response.status(404).json({ message: 'Session de recettes introuvable.' }); return; }
     await ensureOpen(recette.date, recette.equipeId);
     if (recette.fait) { response.status(409).json({ message: 'La session de recettes est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailRecetteCaisse.create({ data: { numRecette: recetteId, modePaymentId: input.modePaymentId, montant: new Prisma.Decimal(input.montant), numero: input.numero, idCuve: input.idCuve } });
-      await transaction.recetteCaisse.update({ where: { id: recetteId }, data: { totalRecettes: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const { line, total } = await prisma.$transaction(async (transaction) => {
+      const created = await transaction.detailRecetteCaisse.create({ data: { numRecette: recetteId, modePaymentId: input.modePaymentId, montant: new Prisma.Decimal(input.montant), numero: input.numero, idCuve: input.idCuve, date: new Date(), equipeId: recette.equipeId, caisseId: recette.caisseId, vendeurId: recette.vendeurId } , include: { modePayment: true } });
+      const updated = await transaction.recetteCaisse.update({ where: { id: recetteId }, data: { totalRecettes: { increment: new Prisma.Decimal(input.montant) } } });
+      return { line: created, total: updated.totalRecettes };
     });
+    emitSocketEvent(recette.magasinId, SOCKET_EVENTS.RECETTE_ADDED, { magasinId: recette.magasinId ?? 0, caisseId: recette.caisseId, equipeId: recette.equipeId, montant: input.montant, modePayment: line.modePayment.libelle, total: Number(total) });
     response.status(201).json({ ...line, montant: toNumber(line.montant) });
   } catch (error) { next(error); }
 });
@@ -95,11 +100,12 @@ router.post('/depenses/:id/lignes', ...caisseAccess, async (request, response, n
     if (!depense) { response.status(404).json({ message: 'Session de depenses introuvable.' }); return; }
     await ensureOpen(depense.date, depense.equipeId);
     if (depense.fait) { response.status(409).json({ message: 'La session de depenses est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailDepenses.create({ data: { numDepense: depenseId, codeDepense: input.codeDepense, montant: new Prisma.Decimal(input.montant), libelle: input.libelle } });
-      await transaction.depensesCaisse.update({ where: { id: depenseId }, data: { totalDepenses: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const { line, total } = await prisma.$transaction(async (transaction) => {
+      const created = await transaction.detailDepenses.create({ data: { numDepense: depenseId, codeDepense: input.codeDepense, montant: new Prisma.Decimal(input.montant), libelle: input.libelle, date: new Date(), equipeId: depense.equipeId, caisseId: depense.caisseId, vendeurId: depense.vendeurId } });
+      const updated = await transaction.depensesCaisse.update({ where: { id: depenseId }, data: { totalDepenses: { increment: new Prisma.Decimal(input.montant) } } });
+      return { line: created, total: updated.totalDepenses };
     });
+    emitSocketEvent(depense.magasinId, SOCKET_EVENTS.DEPENSE_ADDED, { magasinId: depense.magasinId ?? 0, caisseId: depense.caisseId, equipeId: depense.equipeId, montant: input.montant, codeDepense: input.codeDepense, total: Number(total) });
     response.status(201).json({ ...line, montant: toNumber(line.montant) });
   } catch (error) { next(error); }
 });
@@ -123,11 +129,19 @@ router.post('/credits/:id/lignes', ...caisseAccess, async (request, response, ne
     if (!credit) { response.status(404).json({ message: 'Session de credits introuvable.' }); return; }
     await ensureOpen(credit.date, credit.equipeId);
     if (credit.fait) { response.status(409).json({ message: 'La session de credits est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailCredit.create({ data: { numCredit: creditId, clientId: input.clientId, montant: new Prisma.Decimal(input.montant), libelle: input.libelle, modePayment: input.modePayment } });
-      await transaction.creditCaisse.update({ where: { id: creditId }, data: { totalCredits: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const { line, total } = await prisma.$transaction(async (transaction) => {
+      const created = await transaction.detailCredit.create({ data: { numCredit: creditId, clientId: input.clientId, montant: new Prisma.Decimal(input.montant), libelle: input.libelle, modePayment: input.modePayment, date: new Date(), equipeId: credit.equipeId, caisseId: credit.caisseId, vendeurId: credit.vendeurId } });
+      const updated = await transaction.creditCaisse.update({ where: { id: creditId }, data: { totalCredits: { increment: new Prisma.Decimal(input.montant) } } });
+      if (BUSINESS_RULES.CREDIT_CREATES_RECETTE_LINE) {
+        const recette = await transaction.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date: credit.date, equipeId: credit.equipeId, caisseId: credit.caisseId } } });
+        const creditMode = await transaction.modePayment.findFirst({ where: { OR: [{ libelle: 'Crédit client' }, { famille: '4' }] } });
+        if (!recette || !creditMode) throw new Error('La session de recettes ou le mode Crédit client est introuvable.');
+        await transaction.detailRecetteCaisse.create({ data: { numRecette: recette.id, modePaymentId: creditMode.id, montant: new Prisma.Decimal(input.montant), date: new Date(), equipeId: credit.equipeId, caisseId: credit.caisseId, vendeurId: credit.vendeurId } });
+        await transaction.recetteCaisse.update({ where: { id: recette.id }, data: { totalRecettes: { increment: new Prisma.Decimal(input.montant) } } });
+      }
+      return { line: created, total: updated.totalCredits };
     });
+    emitSocketEvent(credit.magasinId, SOCKET_EVENTS.CREDIT_ADDED, { magasinId: credit.magasinId ?? 0, clientId: input.clientId, montant: input.montant, total: Number(total) });
     response.status(201).json({ ...line, montant: toNumber(line.montant) });
   } catch (error) { next(error); }
 });
@@ -141,8 +155,9 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
     const result = await prisma.$transaction(async (transaction) => {
       const closure = await transaction.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } } });
       if (closure?.fait) { const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
-      const recette = await transaction.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } });
+      const recette = await transaction.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } }, include: { caisse: true } });
       if (!recette) { const error = new Error('Aucune session de recettes a cloturer pour cette caisse.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
+      if (recette.caisse.type !== 'PISTE') { const error = new Error('Le workflow caisse classique est reserve aux caisses PISTE.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
       const [releves, depense, retours] = await Promise.all([
         transaction.mobVCarCaisse.findMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId } }),
         transaction.depensesCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } }),
@@ -166,6 +181,7 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
       await transaction.creditCaisse.updateMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId }, data: { fait: true } });
       return updated;
     });
+    emitSocketEvent(request.user?.magasinId, SOCKET_EVENTS.CLOTURE_DONE, { date: result.date.toISOString().slice(0, 10), equipeId: input.equipeId, magasinId: request.user?.magasinId ?? 0 });
     response.json({ ...result, date: result.date.toISOString().slice(0, 10), totalRecettes: toNumber(result.totalRecettes), recetteTheorique: toNumber(result.recetteTheorique), ecartRecette: toNumber(result.ecartRecette), reserveFinTheorique: toNumber(result.reserveFinTheorique), reserveFinAttendue: toNumber(result.reserveFinAttendue), ecartCaisse: toNumber(result.ecartCaisse) });
   } catch (error) { next(error); }
 });
@@ -183,13 +199,23 @@ router.get('/resume/:date/:equipeId/:caisseId', ...caisseAccess, async (request,
     const totalRecettes = Number(recette?.totalRecettes ?? 0);
     const totalDepenses = Number(depense?.totalDepenses ?? 0);
     const totalCredits = Number(credit?.totalCredits ?? 0);
+    const [fuelRows, boutiqueTotal] = await Promise.all([
+      prisma.mobVCarCaisse.findMany({ where: { date, equipeId: params.equipeId, caisseId: params.caisseId, indexFermeture: { not: null } } }),
+      prisma.carProdSiege.aggregate({ where: { date, equipeId: params.equipeId, caisseId: params.caisseId }, _sum: { prixVenteTTC: true } }),
+    ]);
+    const totalEspeces = recette?.details.filter((line) => line.modePayment.famille === '1').reduce((total, line) => total.plus(line.montant), new Prisma.Decimal(0)) ?? new Prisma.Decimal(0);
+    const totalCheques = recette?.details.filter((line) => line.modePayment.famille === '2' || line.modePayment.libelle.toLowerCase().includes('chèque')).reduce((total, line) => total.plus(line.montant), new Prisma.Decimal(0)) ?? new Prisma.Decimal(0);
+    const totalCarte = recette?.details.filter((line) => line.modePayment.famille === '3' || line.modePayment.libelle.toLowerCase().includes('carte')).reduce((total, line) => total.plus(line.montant), new Prisma.Decimal(0)) ?? new Prisma.Decimal(0);
+    const totalCarburant = fuelRows.reduce((total, row) => row.indexFermeture == null ? total : total.plus(row.indexFermeture.minus(row.indexOuverture).times(row.prixVente)), new Prisma.Decimal(0));
+    const totalBoutique = boutiqueTotal._sum.prixVenteTTC ?? new Prisma.Decimal(0);
+    const totalTheorique = totalCarburant.plus(totalBoutique).plus(credit?.totalCredits ?? 0);
     const breakdown = new Map<number, { modePaymentId: number; libelle: string; montant: number }>();
     for (const line of recette?.details ?? []) {
       const current = breakdown.get(line.modePaymentId) ?? { modePaymentId: line.modePaymentId, libelle: line.modePayment.libelle, montant: 0 };
       current.montant += Number(line.montant);
       breakdown.set(line.modePaymentId, current);
     }
-    response.json({ recetteId: recette?.id ?? null, depenseId: depense?.id ?? null, creditId: credit?.id ?? null, totalRecettes, totalDepenses, totalCredits, soldeNet: totalRecettes - totalDepenses - totalCredits, fait: Boolean(closure?.fait), recettes: (recette?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), cuve: line.cuve ? { id: line.cuve.id, libelle: line.cuve.libelle } : null })), depenses: (depense?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant) })), credits: (credit?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), client: { id: line.client.id, nomClient: line.client.nomClient } })), breakdown: [...breakdown.values()] });
+    response.json({ recetteId: recette?.id ?? null, depenseId: depense?.id ?? null, creditId: credit?.id ?? null, sessionStatut: recette?.statut ?? (closure?.fait ? 'FERME' : 'NON_OUVERTE'), fondsCaisseOuverture: toNumber(recette?.fondsCaisseOuverture) ?? 0, recettesTotaux: { totalEspeces: totalEspeces.toNumber(), totalCheques: totalCheques.toNumber(), totalCarte: totalCarte.toNumber(), totalCredits, totalDeclaree: totalRecettes }, theorique: { carburant: totalCarburant.toNumber(), boutique: totalBoutique.toNumber(), credits: totalCredits, total: totalTheorique.toNumber() }, ecartProvisoire: new Prisma.Decimal(totalRecettes).minus(totalTheorique).toNumber(), totalRecettes, totalDepenses, totalCredits, soldeNet: totalRecettes - totalDepenses - totalCredits, fait: Boolean(closure?.fait), recettes: (recette?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), cuve: line.cuve ? { id: line.cuve.id, libelle: line.cuve.libelle } : null })), depenses: (depense?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant) })), credits: (credit?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), client: { id: line.client.id, nomClient: line.client.nomClient } })), breakdown: [...breakdown.values()] });
   } catch (error) { next(error); }
 });
 

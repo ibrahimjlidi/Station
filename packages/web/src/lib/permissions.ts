@@ -11,6 +11,7 @@ export type PermissionKey =
   | 'boutique.achats'
   | 'boutique.inventaire'
   | 'boutique.ventes'
+  | 'pos.terminal'
   | 'caisse.saisie'
   | 'caisse.cloture'
   | 'clients.liste'
@@ -53,6 +54,7 @@ export const permissionRoles: Record<PermissionKey, Role[]> = {
   'boutique.achats': cashierRoles,
   'boutique.inventaire': managerRoles,
   'boutique.ventes': allRoles,
+  'pos.terminal': cashierRoles,
   'caisse.saisie': cashierRoles,
   'caisse.cloture': cashierRoles,
   'clients.liste': cashierRoles,
@@ -95,6 +97,7 @@ const routePermissions: Array<{ prefix: string; permission: PermissionKey }> = [
   { prefix: '/boutique/achats', permission: 'boutique.achats' },
   { prefix: '/boutique/inventaire', permission: 'boutique.inventaire' },
   { prefix: '/boutique/ventes', permission: 'boutique.ventes' },
+  { prefix: '/pos', permission: 'pos.terminal' },
   { prefix: '/caisse/saisie', permission: 'caisse.saisie' },
   { prefix: '/caisse/cloture', permission: 'caisse.cloture' },
   { prefix: '/clients/bl', permission: 'clients.bl' },
