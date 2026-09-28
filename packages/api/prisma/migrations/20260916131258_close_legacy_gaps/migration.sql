@@ -322,12 +322,9 @@ ALTER TABLE `Detentretien` ADD CONSTRAINT `Detentretien_serviceId_fkey` FOREIGN 
 
 -- RedefineIndex
 CREATE INDEX `Caisse_magasinId_idx` ON `Caisse`(`magasinId`);
-DROP INDEX `Caisse_magasinId_fkey` ON `caisse`;
 
 -- RedefineIndex
 CREATE INDEX `Cuve_magasinId_idx` ON `Cuve`(`magasinId`);
-DROP INDEX `Cuve_magasinId_fkey` ON `cuve`;
 
 -- RedefineIndex
 CREATE INDEX `Equipe_magasinId_idx` ON `Equipe`(`magasinId`);
-DROP INDEX `Equipe_magasinId_fkey` ON `equipe`;

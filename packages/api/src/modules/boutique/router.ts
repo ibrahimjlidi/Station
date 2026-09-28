@@ -1,89 +1,934 @@
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
-import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
-import { achatSchema, familleSchema, filterSchema, inventSchema, produitSchema, transfertSchema } from './boutique.schema.js';
+
+import { db } from '../../lib/db.js';
+
+import {
+  requireAuth,
+  requireRole,
+  type AuthRequest,
+} from '../../middleware/auth.js';
+
+import {
+  achatSchema,
+  familleSchema,
+  filterSchema,
+  inventSchema,
+  produitSchema,
+  transfertSchema,
+} from './boutique.schema.js';
 
 const router = Router();
+
 const read = [requireAuth];
-const cashier = [requireAuth, requireRole('caissier', 'gerant')];
-const manager = [requireAuth, requireRole('gerant')];
-const toDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
-const numberValue = (value: Prisma.Decimal | number | null | undefined) => value == null ? null : Number(value);
-const dateFilter = (from?: string, to?: string) => ({ ...(from || to ? { gte: from ? toDate(from) : undefined, lte: to ? toDate(to) : undefined } : {}) });
 
-router.get('/produits', ...read, async (request, response, next) => {
-  try { const familleId = request.query.familleId ? Number(request.query.familleId) : undefined; const products = await prisma.produit.findMany({ where: { actif: true, familleId }, include: { famille: true, fournisseur: true }, orderBy: { libelle: 'asc' } }); response.json(products.map((product) => ({ ...product, prixAchatHT: numberValue(product.prixAchatHT), prixVenteHT: numberValue(product.prixVenteHT), tva: numberValue(product.tva), tauxTVA: numberValue(product.tauxTVA), stock: numberValue(product.stock) }))); } catch (error) { next(error); }
-});
+const cashier = [
+  requireAuth,
+  requireRole('caissier', 'gerant'),
+];
 
-router.post('/produits', ...manager, async (request, response, next) => {
-  try { const input = produitSchema.parse(request.body); const product = await prisma.produit.create({ data: { ...input, prixAchatHT: new Prisma.Decimal(input.prixAchatHT), prixVenteHT: new Prisma.Decimal(input.prixVenteHT), tva: new Prisma.Decimal(input.tauxTVA), tauxTVA: new Prisma.Decimal(input.tauxTVA) } }); response.status(201).json({ ...product, stock: numberValue(product.stock) }); } catch (error) { next(error); }
-});
+const manager = [
+  requireAuth,
+  requireRole('gerant'),
+];
 
-router.put('/produits/:id', ...manager, async (request, response, next) => {
-  try { const input = produitSchema.partial().parse(request.body); const product = await prisma.produit.update({ where: { id: Number(request.params.id) }, data: { ...input, ...(input.prixAchatHT === undefined ? {} : { prixAchatHT: new Prisma.Decimal(input.prixAchatHT) }), ...(input.prixVenteHT === undefined ? {} : { prixVenteHT: new Prisma.Decimal(input.prixVenteHT) }), ...(input.tauxTVA === undefined ? {} : { tva: new Prisma.Decimal(input.tauxTVA), tauxTVA: new Prisma.Decimal(input.tauxTVA) }), ...(input.stock === undefined ? {} : { stock: new Prisma.Decimal(input.stock) }) } }); response.json({ ...product, stock: numberValue(product.stock) }); } catch (error) { next(error); }
-});
+const toDate = (value: string) =>
+  new Date(`${value}T00:00:00.000Z`);
 
-router.get('/familles-produits', ...read, async (_request, response, next) => {
-  try { response.json(await prisma.familleProduit.findMany({ orderBy: { libelle: 'asc' } })); } catch (error) { next(error); }
-});
+const numberValue = (
+  value: number | string | null | undefined
+) => {
+  if (value === null || value === undefined) {
+    return null;
+  }
 
-router.post('/familles-produits', ...manager, async (request, response, next) => {
-  try { response.status(201).json(await prisma.familleProduit.create({ data: familleSchema.parse(request.body) })); } catch (error) { next(error); }
-});
+  return Number(value);
+};
 
-router.post('/achats-produits', ...cashier, async (request, response, next) => {
-  try {
-    const input = achatSchema.parse(request.body);
-    const productIds = input.lignes.map((line) => line.produitId);
-    const products = await prisma.produit.findMany({ where: { id: { in: productIds }, actif: true } });
-    if (products.length !== new Set(productIds).size) { response.status(400).json({ message: 'Un produit est introuvable ou inactif.' }); return; }
-    const totalHT = input.lignes.reduce((sum, line) => sum + line.quantite * line.prixAchat, 0);
-    const totalTTC = input.lignes.reduce((sum, line) => sum + line.quantite * line.prixAchat * (1 + line.tauxTVA / 100), 0);
-    const purchase = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.achatProd.create({ data: { magasinId: request.user?.magasinId, fournisseurId: input.fournisseurId, dateAchat: toDate(input.dateAchat), dateFacture: input.dateFacture ? toDate(input.dateFacture) : undefined, numFacture: input.numFacture, totalTTC: new Prisma.Decimal(totalTTC), totHT: new Prisma.Decimal(totalHT), valide: input.valide, details: { create: input.lignes.map((line) => ({ produitId: line.produitId, date: toDate(input.dateAchat), quantite: new Prisma.Decimal(line.quantite), prixAchat: new Prisma.Decimal(line.prixAchat), tauxTVA: new Prisma.Decimal(line.tauxTVA), valide: input.valide })) } }, include: { details: true } });
-      for (const line of input.lignes) await transaction.produit.update({ where: { id: line.produitId }, data: { stock: { increment: new Prisma.Decimal(line.quantite) }, prixAchatHT: new Prisma.Decimal(line.prixAchat) } });
-      return created;
-    });
-    response.status(201).json({ ...purchase, totalTTC: numberValue(purchase.totalTTC), totHT: numberValue(purchase.totHT) });
-  } catch (error) { next(error); }
-});
+/**
+ * ============================================================
+ * PRODUITS
+ * ============================================================
+ */
 
-router.get('/achats-produits', ...read, async (request, response, next) => {
-  try { const filter = filterSchema.parse(request.query); const purchases = await prisma.achatProd.findMany({ where: scopeToMagasin(request, { fournisseurId: filter.fournisseurId, dateAchat: dateFilter(filter.dateFrom, filter.dateTo) }), include: { fournisseur: true, details: { include: { produit: true } } }, orderBy: { dateAchat: 'desc' } }); response.json(purchases.map((purchase) => ({ ...purchase, totalTTC: numberValue(purchase.totalTTC), totHT: numberValue(purchase.totHT), reste: numberValue(purchase.reste) }))); } catch (error) { next(error); }
-});
+/**
+ * GET /produits
+ */
+router.get(
+  '/produits',
+  ...read,
+  async (_request, response, next) => {
+    try {
+      const familleId = _request.query.familleId
+        ? Number(_request.query.familleId)
+        : undefined;
 
-router.post('/inventaires', ...read, async (request, response, next) => {
-  try {
-    const input = inventSchema.parse(request.body);
-    const products = await prisma.produit.findMany({ where: { id: { in: input.lignes.map((line) => line.produitId) } } });
-    const map = new Map(products.map((product) => [product.id, product]));
-    if (map.size !== new Set(input.lignes.map((line) => line.produitId)).size) { response.status(400).json({ message: 'Un produit inventorie est introuvable.' }); return; }
-    const inventory = await prisma.invent.create({ data: { date: toDate(input.date), operateur: input.operateur, valeurStock: new Prisma.Decimal(input.lignes.reduce((sum, line) => sum + line.stockInventaire * Number(map.get(line.produitId)!.prixAchatHT), 0)), lignes: { create: input.lignes.map((line) => { const product = map.get(line.produitId)!; return { produitId: line.produitId, date: toDate(input.date), stockTheorique: product.stock, stockInventaire: new Prisma.Decimal(line.stockInventaire), valeurTheorique: product.stock.times(product.prixAchatHT), ecartStock: new Prisma.Decimal(line.stockInventaire).minus(product.stock), familleId: product.familleId }; }) } }, include: { lignes: true } });
-    response.status(201).json({ ...inventory, valeurStock: numberValue(inventory.valeurStock) });
-  } catch (error) { next(error); }
-});
+      let sql = `
+        SELECT
+          p.*,
 
-router.patch('/inventaires/:id/cloturer', ...manager, async (request, response, next) => {
-  try {
-    const inventory = await prisma.invent.findUnique({ where: { id: Number(request.params.id) }, include: { lignes: true } });
-    if (!inventory) { response.status(404).json({ message: 'Inventaire introuvable.' }); return; }
-    if (inventory.cloture) { response.status(409).json({ message: 'Inventaire deja cloture.' }); return; }
-    const updated = await prisma.$transaction(async (transaction) => { for (const line of inventory.lignes) await transaction.produit.update({ where: { id: line.produitId }, data: { stock: line.stockInventaire } }); return transaction.invent.update({ where: { id: inventory.id }, data: { cloture: true } }); });
-    response.json(updated);
-  } catch (error) { next(error); }
-});
+          f.id AS famille_id,
+          f.libelle AS famille_libelle,
 
-router.get('/inventaires', ...read, async (_request, response, next) => {
-  try { const inventories = await prisma.invent.findMany({ include: { user: true }, orderBy: { date: 'desc' } }); response.json(inventories.map((inventory) => ({ ...inventory, valeurStock: numberValue(inventory.valeurStock), operateurNom: inventory.user.nom }))); } catch (error) { next(error); }
-});
+          fr.id AS fournisseur_id,
+          fr.libelle AS fournisseur_libelle
 
-router.get('/ventes/resume', ...read, async (request, response, next) => {
-  try { const filter = filterSchema.parse(request.query); const sales = await prisma.carProdSiege.findMany({ where: { date: dateFilter(filter.dateFrom, filter.dateTo), equipeId: filter.equipeId }, select: { numVente: true, prixVenteTTC: true, prixAchatTTC: true, quantite: true, marge: true, codeFamille: true } }); const totalCA = sales.reduce((sum, sale) => sum + Number(sale.prixVenteTTC) * Number(sale.quantite), 0); const totalMarge = sales.reduce((sum, sale) => sum + Number(sale.marge) * Number(sale.quantite), 0); const familles = new Map<string, number>(); sales.forEach((sale) => familles.set(sale.codeFamille ?? 'Sans famille', (familles.get(sale.codeFamille ?? 'Sans famille') ?? 0) + Number(sale.prixVenteTTC) * Number(sale.quantite))); response.json({ totalCA, totalMarge, nombreVentes: new Set(sales.map((sale) => sale.numVente)).size, margePourcentage: totalCA ? totalMarge / totalCA * 100 : 0, parFamille: [...familles.entries()].map(([famille, ca]) => ({ famille, ca })) }); } catch (error) { next(error); }
-});
+        FROM produit p
 
-router.post('/transferts', ...manager, async (request, response, next) => {
-  try { const input = transfertSchema.parse(request.body); const transfer = await prisma.$transaction(async (transaction) => { const created = await transaction.transEtranger.create({ data: { fournisseurId: input.fournisseurId, dateTransfert: toDate(input.dateTransfert), op: input.op, valide: input.valide, details: { create: input.lignes.map((line) => ({ produitId: line.produitId, quantite: new Prisma.Decimal(line.quantite), prixUnitaire: new Prisma.Decimal(line.prixUnitaire) })) } }, include: { details: true } }); for (const line of input.lignes) await transaction.produit.update({ where: { id: line.produitId }, data: { stock: { decrement: new Prisma.Decimal(line.quantite) } } }); return created; }); response.status(201).json(transfer); } catch (error) { next(error); }
-});
+        LEFT JOIN familleProduit f
+          ON f.id = p.familleId
+
+        LEFT JOIN fournisseur fr
+          ON fr.id = p.fournisseurId
+
+        WHERE p.actif = 1
+      `;
+
+      const params: any[] = [];
+
+      if (familleId !== undefined) {
+        sql += ` AND p.familleId = ? `;
+        params.push(familleId);
+      }
+
+      sql += `
+        ORDER BY p.libelle ASC
+      `;
+
+      const [rows] = await db.query(
+        sql,
+        params
+      );
+
+      const products = (
+        rows as any[]
+      ).map((product) => ({
+        ...product,
+
+        famille: product.famille_id
+          ? {
+              id: product.famille_id,
+              libelle:
+                product.famille_libelle,
+            }
+          : null,
+
+        fournisseur:
+          product.fournisseur_id
+            ? {
+                id:
+                  product.fournisseur_id,
+                libelle:
+                  product.fournisseur_libelle,
+              }
+            : null,
+
+        prixAchatHT: numberValue(
+          product.prixAchatHT
+        ),
+
+        prixVenteHT: numberValue(
+          product.prixVenteHT
+        ),
+
+        tva: numberValue(
+          product.tva
+        ),
+
+        tauxTVA: numberValue(
+          product.tauxTVA
+        ),
+
+        stock: numberValue(
+          product.stock
+        ),
+      }));
+
+      response.json(products);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /produits
+ */
+router.post(
+  '/produits',
+  ...manager,
+  async (request, response, next) => {
+    try {
+      const input =
+        produitSchema.parse(
+          request.body
+        );
+
+      const [result] = await db.query(
+        `
+        INSERT INTO produit
+        (
+          libelle,
+          code,
+          familleId,
+          fournisseurId,
+          prixAchatHT,
+          prixVenteHT,
+          tva,
+          tauxTVA,
+          stock,
+          actif
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `,
+        [
+          input.libelle,
+          input.code ?? null,
+          input.familleId ?? null,
+          input.fournisseurId ?? null,
+          input.prixAchatHT,
+          input.prixVenteHT,
+          input.tauxTVA,
+          input.tauxTVA,
+          input.stock ?? 0,
+        ]
+      );
+
+      const insertResult =
+        result as any;
+
+      const [rows] = await db.query(
+        `
+        SELECT *
+        FROM produit
+        WHERE id = ?
+        LIMIT 1
+        `,
+        [insertResult.insertId]
+      );
+
+      const product =
+        (rows as any[])[0];
+
+      response.status(201).json({
+        ...product,
+
+        prixAchatHT: numberValue(
+          product.prixAchatHT
+        ),
+
+        prixVenteHT: numberValue(
+          product.prixVenteHT
+        ),
+
+        tva: numberValue(
+          product.tva
+        ),
+
+        tauxTVA: numberValue(
+          product.tauxTVA
+        ),
+
+        stock: numberValue(
+          product.stock
+        ),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * PUT /produits/:id
+ */
+router.put(
+  '/produits/:id',
+  ...manager,
+  async (request, response, next) => {
+    try {
+      const id = Number(
+        request.params.id
+      );
+
+      const input =
+        produitSchema
+          .partial()
+          .parse(request.body);
+
+      const fields: string[] = [];
+      const values: any[] = [];
+
+      if (
+        input.libelle !== undefined
+      ) {
+        fields.push(
+          'libelle = ?'
+        );
+        values.push(input.libelle);
+      }
+
+      if (
+        input.code !== undefined
+      ) {
+        fields.push(
+          'code = ?'
+        );
+        values.push(input.code);
+      }
+
+      if (
+        input.familleId !== undefined
+      ) {
+        fields.push(
+          'familleId = ?'
+        );
+        values.push(
+          input.familleId
+        );
+      }
+
+      if (
+        input.fournisseurId !==
+        undefined
+      ) {
+        fields.push(
+          'fournisseurId = ?'
+        );
+        values.push(
+          input.fournisseurId
+        );
+      }
+
+      if (
+        input.prixAchatHT !==
+        undefined
+      ) {
+        fields.push(
+          'prixAchatHT = ?'
+        );
+        values.push(
+          input.prixAchatHT
+        );
+      }
+
+      if (
+        input.prixVenteHT !==
+        undefined
+      ) {
+        fields.push(
+          'prixVenteHT = ?'
+        );
+        values.push(
+          input.prixVenteHT
+        );
+      }
+
+      if (
+        input.tauxTVA !==
+        undefined
+      ) {
+        fields.push(
+          'tauxTVA = ?'
+        );
+
+        fields.push(
+          'tva = ?'
+        );
+
+        values.push(
+          input.tauxTVA,
+          input.tauxTVA
+        );
+      }
+
+      if (
+        input.stock !== undefined
+      ) {
+        fields.push(
+          'stock = ?'
+        );
+
+        values.push(
+          input.stock
+        );
+      }
+
+      if (
+        input.actif !== undefined
+      ) {
+        fields.push(
+          'actif = ?'
+        );
+
+        values.push(
+          input.actif
+        );
+      }
+
+      if (fields.length === 0) {
+        response.status(400).json({
+          message:
+            'Aucune donnée à modifier.',
+        });
+
+        return;
+      }
+
+      values.push(id);
+
+      await db.query(
+        `
+        UPDATE produit
+        SET ${fields.join(', ')}
+        WHERE id = ?
+        `,
+        values
+      );
+
+      const [rows] =
+        await db.query(
+          `
+          SELECT *
+          FROM produit
+          WHERE id = ?
+          LIMIT 1
+          `,
+          [id]
+        );
+
+      const product =
+        (rows as any[])[0];
+
+      if (!product) {
+        response.status(404).json({
+          message:
+            'Produit introuvable.',
+        });
+
+        return;
+      }
+
+      response.json({
+        ...product,
+
+        prixAchatHT: numberValue(
+          product.prixAchatHT
+        ),
+
+        prixVenteHT: numberValue(
+          product.prixVenteHT
+        ),
+
+        tva: numberValue(
+          product.tva
+        ),
+
+        tauxTVA: numberValue(
+          product.tauxTVA
+        ),
+
+        stock: numberValue(
+          product.stock
+        ),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * ============================================================
+ * FAMILLES
+ * ============================================================
+ */
+
+/**
+ * GET /familles-produits
+ */
+router.get(
+  '/familles-produits',
+  ...read,
+  async (_request, response, next) => {
+    try {
+      const [rows] =
+        await db.query(`
+          SELECT *
+          FROM familleProduit
+          ORDER BY libelle ASC
+        `);
+
+      response.json(rows);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * POST /familles-produits
+ */
+router.post(
+  '/familles-produits',
+  ...manager,
+  async (request, response, next) => {
+    try {
+      const input =
+        familleSchema.parse(
+          request.body
+        );
+
+      const [result] =
+        await db.query(
+          `
+          INSERT INTO familleProduit
+          SET ?
+          `,
+          input
+        );
+
+      const insertResult =
+        result as any;
+
+      const [rows] =
+        await db.query(
+          `
+          SELECT *
+          FROM familleProduit
+          WHERE id = ?
+          LIMIT 1
+          `,
+          [
+            insertResult.insertId,
+          ]
+        );
+
+      response.status(201).json(
+        (rows as any[])[0]
+      );
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * ============================================================
+ * ACHATS PRODUITS
+ * ============================================================
+ */
+
+/**
+ * POST /achats-produits
+ */
+router.post(
+  '/achats-produits',
+  ...cashier,
+  async (
+    request: AuthRequest,
+    response,
+    next
+  ) => {
+    const connection =
+      await db.getConnection();
+
+    try {
+      const input =
+        achatSchema.parse(
+          request.body
+        );
+
+      /**
+       * Vérifier les produits
+       */
+      const productIds =
+        input.lignes.map(
+          (line) =>
+            line.produitId
+        );
+
+      const placeholders =
+        productIds
+          .map(() => '?')
+          .join(', ');
+
+      const [
+        productRows,
+      ] = await connection.query(
+        `
+        SELECT *
+        FROM produit
+        WHERE id IN (${placeholders})
+        AND actif = 1
+        `,
+        productIds
+      );
+
+      const products =
+        productRows as any[];
+
+      if (
+        products.length !==
+        new Set(productIds).size
+      ) {
+        response.status(400).json({
+          message:
+            'Un produit est introuvable ou inactif.',
+        });
+
+        return;
+      }
+
+      /**
+       * Totaux
+       */
+      const totalHT =
+        input.lignes.reduce(
+          (
+            sum,
+            line
+          ) =>
+            sum +
+            line.quantite *
+              line.prixAchat,
+          0
+        );
+
+      const totalTTC =
+        input.lignes.reduce(
+          (
+            sum,
+            line
+          ) =>
+            sum +
+            line.quantite *
+              line.prixAchat *
+              (1 +
+                line.tauxTVA /
+                  100),
+          0
+        );
+
+      await connection.beginTransaction();
+
+      /**
+       * Créer achat
+       */
+      const [
+        purchaseResult,
+      ] = await connection.query(
+        `
+        INSERT INTO achatProd
+        (
+          magasinId,
+          fournisseurId,
+          dateAchat,
+          dateFacture,
+          numFacture,
+          totalTTC,
+          totHT,
+          valide
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [
+          request.user?.magasinId ??
+            null,
+          input.fournisseurId ??
+            null,
+          toDate(
+            input.dateAchat
+          ),
+          input.dateFacture
+            ? toDate(
+                input.dateFacture
+              )
+            : null,
+          input.numFacture ??
+            null,
+          totalTTC,
+          totalHT,
+          input.valide,
+        ]
+      );
+
+      const purchaseId =
+        (purchaseResult as any)
+          .insertId;
+
+      /**
+       * Créer détails + mettre stock
+       */
+      for (const line of
+        input.lignes) {
+        await connection.query(
+          `
+          INSERT INTO DetailAchatProd
+          (
+            achatProdId,
+            produitId,
+            date,
+            quantite,
+            prixAchat,
+            tauxTVA,
+            valide
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          `,
+          [
+            purchaseId,
+            line.produitId,
+            toDate(
+              input.dateAchat
+            ),
+            line.quantite,
+            line.prixAchat,
+            line.tauxTVA,
+            input.valide,
+          ]
+        );
+
+        await connection.query(
+          `
+          UPDATE produit
+          SET
+            stock = COALESCE(stock, 0) + ?,
+            prixAchatHT = ?
+          WHERE id = ?
+          `,
+          [
+            line.quantite,
+            line.prixAchat,
+            line.produitId,
+          ]
+        );
+      }
+
+      await connection.commit();
+
+      /**
+       * Retourner achat
+       */
+      const [
+        purchaseRows,
+      ] = await db.query(
+        `
+        SELECT *
+        FROM achatProd
+        WHERE id = ?
+        LIMIT 1
+        `,
+        [purchaseId]
+      );
+
+      const purchase =
+        (purchaseRows as any[])[0];
+
+      const [
+        detailRows,
+      ] = await db.query(
+        `
+        SELECT *
+        FROM DetailAchatProd
+        WHERE achatProdId = ?
+        `,
+        [purchaseId]
+      );
+
+      response.status(201).json({
+        ...purchase,
+
+        totalTTC: numberValue(
+          purchase.totalTTC
+        ),
+
+        totHT: numberValue(
+          purchase.totHT
+        ),
+
+        details: detailRows,
+      });
+    } catch (error) {
+      await connection.rollback();
+      next(error);
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+/**
+ * GET /achats-produits
+ */
+router.get(
+  '/achats-produits',
+  ...read,
+  async (
+    request: AuthRequest,
+    response,
+    next
+  ) => {
+    try {
+      const filter =
+        filterSchema.parse(
+          request.query
+        );
+
+      const conditions: string[] = [];
+
+      const params: any[] = [];
+
+      /**
+       * Magasin
+       */
+      if (
+        request.user?.magasinId !==
+          null &&
+        request.user?.magasinId !==
+          undefined
+      ) {
+        conditions.push(
+          'a.magasinId = ?'
+        );
+
+        params.push(
+          request.user.magasinId
+        );
+      }
+
+      /**
+       * Fournisseur
+       */
+      if (
+        filter.fournisseurId !==
+        undefined
+      ) {
+        conditions.push(
+          'a.fournisseurId = ?'
+        );
+
+        params.push(
+          filter.fournisseurId
+        );
+      }
+
+      /**
+       * Date début
+       */
+      if (filter.dateFrom) {
+        conditions.push(
+          'a.dateAchat >= ?'
+        );
+
+        params.push(
+          toDate(
+            filter.dateFrom
+          )
+        );
+      }
+
+      /**
+       * Date fin
+       */
+      if (filter.dateTo) {
+        const dateTo =
+          toDate(filter.dateTo);
+
+        dateTo.setUTCDate(
+          dateTo.getUTCDate() + 1
+        );
+
+        conditions.push(
+          'a.dateAchat < ?'
+        );
+
+        params.push(dateTo);
+      }
+
+      const where =
+        conditions.length
+          ? `WHERE ${conditions.join(
+              ' AND '
+            )}`
+          : '';
+
+      const [
+        purchaseRows,
+      ] = await db.query(
+        `
+        SELECT
+          a.*,
+
+          f.id AS fournisseur_id,
+          f.libelle AS fournisseur_libelle
+
+        FROM achatProd a
+
+        LEFT JOIN fournisseur f
+          ON f.id = a.fournisseurId
+
+        ${where}
+
+        ORDER BY
+          a.dateAchat DESC
+        `,
+        params
+      );
+
+      const purchases =
+        purchaseRows as any[];
+
+      const result = [];
+
+      for (const purchase of
+        purchases) {
+        const [
+          detailRows,
+        ] = await db.query(
+          `
+          SELECT
+            d.*,
+
+            p.id AS produit_id,
+            p.libelle AS produit_libelle
+
+          FROM DetailAchatProd d
+
+          LEFT JOIN produit p
+            ON p.id = d.produitId
+
+          WHERE d.achatProdId = ?
+          `,
+          [purchase.id]
+        );
+
+        result.push({
+          ...purchase,
+
+          totalTTC: numberValue(purchase.totalTTC),
+          totHT: numberValue(purchase.totHT),
+
+          fournisseur: {
+            id: purchase.fournisseur_id,
+            libelle: purchase.fournisseur_libelle,
+          },
+
+          details: (detailRows as any[]).map((line) => ({
+            ...line,
+            prixAchat: numberValue(line.prixAchat),
+            produit: {
+              id: line.produit_id,
+              libelle: line.produit_libelle,
+            },
+          })),
+        });
+      }
+
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 export default router;

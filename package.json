@@ -7,8 +7,7 @@
     "build": "pnpm --parallel --filter @station/api --filter @station/web build",
     "typecheck": "pnpm --parallel --filter @station/api --filter @station/web typecheck",
     "smoke": "node scripts/smoke-production.mjs",
-    "db:generate": "pnpm --filter @station/api prisma:generate",
-    "db:migrate": "pnpm --filter @station/api prisma:migrate"
+    "db:migrate": "pnpm --filter @station/api migrate"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
