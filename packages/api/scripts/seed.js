@@ -32,7 +32,7 @@ async function seed() {
 
     if (!stationId) {
       const [result] = await connection.query(
-        "INSERT INTO Station (code, nom) VALUES (?, ?)",
+        "INSERT INTO Station (code, nom, updatedAt) VALUES (?, ?, NOW(3))",
         ["EL-AMAL", "Station El Amal"],
       );
       stationId = result.insertId;
@@ -50,7 +50,7 @@ async function seed() {
 
     if (!magasinId) {
       const [result] = await connection.query(
-        "INSERT INTO Magasin (stationId, code, nom) VALUES (?, ?, ?)",
+        "INSERT INTO Magasin (stationId, code, nom, updatedAt) VALUES (?, ?, ?, NOW(3))",
         [stationId, "MAG-PRINCIPAL", "Magasin principal"],
       );
       magasinId = result.insertId;
@@ -60,8 +60,8 @@ async function seed() {
     }
 
     await connection.query(
-      `INSERT INTO SetParam (id, stationId, nomStation, adresse, tel, mf, rc, devise, tauxTVADefaut, timbre)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO SetParam (id, stationId, nomStation, adresse, tel, mf, rc, devise, tauxTVADefaut, timbre, updatedAt)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
        ON DUPLICATE KEY UPDATE nomStation = VALUES(nomStation)`,
       [
         stationId,
@@ -78,7 +78,7 @@ async function seed() {
     console.log("✅ Paramètres (SetParam) prêts");
 
     await connection.query(
-      "INSERT IGNORE INTO Compteur (id) VALUES (1)",
+      "INSERT IGNORE INTO Compteur (id, updatedAt) VALUES (1, NOW(3))",
     );
     console.log("✅ Compteur prêt");
 
@@ -93,8 +93,8 @@ async function seed() {
 
     for (const [code, libelle] of equipes) {
       await connection.query(
-        `INSERT INTO Equipe (magasinId, code, libelle)
-         VALUES (?, ?, ?)
+        `INSERT INTO Equipe (magasinId, code, libelle, updatedAt)
+         VALUES (?, ?, ?, NOW(3))
          ON DUPLICATE KEY UPDATE libelle = VALUES(libelle)`,
         [magasinId, code, libelle],
       );
@@ -108,8 +108,8 @@ async function seed() {
 
     for (const [code, libelle] of caisses) {
       await connection.query(
-        `INSERT INTO Caisse (magasinId, code, libelle)
-         VALUES (?, ?, ?)
+        `INSERT INTO Caisse (magasinId, code, libelle, updatedAt)
+         VALUES (?, ?, ?, NOW(3))
          ON DUPLICATE KEY UPDATE libelle = VALUES(libelle)`,
         [magasinId, code, libelle],
       );
@@ -128,8 +128,8 @@ async function seed() {
       const passwordHash = await bcrypt.hash("admin123", 12);
 
       await connection.query(
-        `INSERT INTO User (magasinId, username, passwordHash, nom, prenom, role, actif)
-         VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO User (magasinId, username, passwordHash, nom, prenom, role, actif, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, 1, NOW(3))`,
         [magasinId, "admin", passwordHash, "Admin", "Station", "gerant"],
       );
 
@@ -150,8 +150,8 @@ async function seed() {
 
     for (const [libFamille, compteCPT] of famillesPayment) {
       await connection.query(
-        `INSERT INTO FamillePayment (libFamille, compteCPT)
-         SELECT ?, ? FROM DUAL
+        `INSERT INTO FamillePayment (libFamille, compteCPT, updatedAt)
+         SELECT ?, ?, NOW(3) FROM DUAL
          WHERE NOT EXISTS (SELECT 1 FROM FamillePayment WHERE libFamille = ?)`,
         [libFamille, compteCPT, libFamille],
       );
@@ -167,8 +167,8 @@ async function seed() {
 
     for (const [libelle, famille, compteCPT] of modesPayment) {
       await connection.query(
-        `INSERT INTO ModePayment (libelle, famille, compteCPT)
-         SELECT ?, ?, ? FROM DUAL
+        `INSERT INTO ModePayment (libelle, famille, compteCPT, updatedAt)
+         SELECT ?, ?, ?, NOW(3) FROM DUAL
          WHERE NOT EXISTS (SELECT 1 FROM ModePayment WHERE libelle = ?)`,
         [libelle, famille, compteCPT, libelle],
       );
@@ -183,8 +183,8 @@ async function seed() {
 
     for (const [libelle, compteCPT, compteACH] of famillesProduit) {
       await connection.query(
-        `INSERT INTO FamilleProduit (libelle, compteCPT, compteACH)
-         SELECT ?, ?, ? FROM DUAL
+        `INSERT INTO FamilleProduit (libelle, compteCPT, compteACH, updatedAt)
+         SELECT ?, ?, ?, NOW(3) FROM DUAL
          WHERE NOT EXISTS (SELECT 1 FROM FamilleProduit WHERE libelle = ?)`,
         [libelle, compteCPT, compteACH, libelle],
       );
@@ -198,8 +198,8 @@ async function seed() {
 
     for (const [taux, libelle] of tauxTVA) {
       await connection.query(
-        `INSERT INTO TauxTVA (taux, libelle)
-         SELECT ?, ? FROM DUAL
+        `INSERT INTO TauxTVA (taux, libelle, updatedAt)
+         SELECT ?, ?, NOW(3) FROM DUAL
          WHERE NOT EXISTS (SELECT 1 FROM TauxTVA WHERE libelle = ?)`,
         [taux, libelle, libelle],
       );

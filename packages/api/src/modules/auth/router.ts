@@ -3,18 +3,25 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import type { ResultSetHeader, RowDataPacket } from 'mysql2';
 import { db } from '../../lib/db.js';
-import { authMiddleware, requireRole, type AuthRequest } from '../../middleware/auth.ts';
+import { authMiddleware, requireRole, type AuthRequest } from '../../middleware/auth.js';
 import { changePasswordSchema, loginSchema, resetPasswordSchema, userCreateSchema, userUpdateSchema } from './schemas.js';
 
 const router = Router();
 export const usersRouter = Router();
 const getSecret = () => process.env.JWT_SECRET ?? 'development-secret';
 
-const PUBLIC_COLS = `id, username, nom, prenom, telephone, role, actif, last_login_at AS lastLoginAt, magasin_id AS magasinId`;
+const PUBLIC_COLS = `id, username, nom, prenom, telephone, role, actif, lastLoginAt, magasinId`;
 const toUser = (row: RowDataPacket) => ({ ...row, actif: Boolean(row.actif) });
 
+function magasinFilter(request: AuthRequest) {
+  const magasinId = request.user?.magasinId;
+  return magasinId == null
+    ? { sql: '', params: [] as number[] }
+    : { sql: ' AND magasinId = ?', params: [magasinId] };
+}
+
 async function findPublicUser(id: number) {
-  const [rows] = await db.query<RowDataPacket[]>(`SELECT ${PUBLIC_COLS} FROM users WHERE id = ? LIMIT 1`, [id]);
+  const [rows] = await db.query<RowDataPacket[]>(`SELECT ${PUBLIC_COLS} FROM \`User\` WHERE id = ? LIMIT 1`, [id]);
   return rows[0] ? toUser(rows[0]) : null;
 }
 
@@ -26,7 +33,7 @@ router.post('/login', async (request, response, next) => {
   try {
     const input = loginSchema.parse(request.body);
     const [rows] = await db.query<RowDataPacket[]>(
-      'SELECT id, username, password_hash AS passwordHash, role, actif, magasin_id AS magasinId FROM users WHERE username = ? LIMIT 1',
+      'SELECT id, username, passwordHash, role, actif, magasinId FROM `User` WHERE username = ? LIMIT 1',
       [input.username],
     );
     const user = rows[0];
@@ -38,7 +45,7 @@ router.post('/login', async (request, response, next) => {
       response.status(403).json({ message: 'Compte désactivé, contactez le gérant' });
       return;
     }
-    await db.query('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
+    await db.query('UPDATE `User` SET lastLoginAt = NOW() WHERE id = ?', [user.id]);
     const updated = await findPublicUser(user.id);
     response.json({
       user: updated,
@@ -51,7 +58,7 @@ usersRouter.get('/users', authMiddleware, requireRole('gerant'), async (request:
   try {
     const f = magasinFilter(request);
     const [rows] = await db.query<RowDataPacket[]>(
-      `SELECT ${PUBLIC_COLS} FROM users WHERE 1=1${f.sql} ORDER BY nom ASC, prenom ASC`,
+      `SELECT ${PUBLIC_COLS} FROM \`User\` WHERE 1=1${f.sql} ORDER BY nom ASC, prenom ASC`,
       f.params,
     );
     response.json(rows.map(toUser));
@@ -63,7 +70,7 @@ usersRouter.post('/users', authMiddleware, requireRole('gerant'), async (request
     const input = userCreateSchema.parse(request.body);
     const hash = await bcrypt.hash(input.password, 12);
     const [result] = await db.query<ResultSetHeader>(
-      'INSERT INTO users (username, password_hash, nom, prenom, telephone, role, magasin_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO `User` (username, passwordHash, nom, prenom, telephone, role, magasinId) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [input.username, hash, input.nom, input.prenom, input.telephone ?? null, input.role, request.user?.magasinId ?? null],
     );
     response.status(201).json(await findPublicUser(result.insertId));
@@ -84,7 +91,7 @@ usersRouter.put('/users/:id', authMiddleware, requireRole('gerant'), async (requ
       return;
     }
     const f = magasinFilter(request);
-    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM users WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
+    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM \`User\` WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
     if (!found[0]) {
       response.status(404).json({ message: 'Utilisateur introuvable.' });
       return;
@@ -101,7 +108,7 @@ usersRouter.put('/users/:id', authMiddleware, requireRole('gerant'), async (requ
       }
     }
     if (sets.length > 0) {
-      await db.query(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, [...values, id]);
+      await db.query(`UPDATE \`User\` SET ${sets.join(', ')} WHERE id = ?`, [...values, id]);
     }
     response.json(await findPublicUser(id));
   } catch (error) { next(error); }
@@ -112,12 +119,12 @@ usersRouter.patch('/users/:id/reset-password', authMiddleware, requireRole('gera
     const input = resetPasswordSchema.parse(request.body);
     const id = Number(request.params.id);
     const f = magasinFilter(request);
-    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM users WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
+    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM \`User\` WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
     if (!found[0]) {
       response.status(404).json({ message: 'Utilisateur introuvable.' });
       return;
     }
-    await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [await bcrypt.hash(input.newPassword, 12), id]);
+    await db.query('UPDATE `User` SET passwordHash = ? WHERE id = ?', [await bcrypt.hash(input.newPassword, 12), id]);
     response.json({ message: 'Mot de passe réinitialisé.' });
   } catch (error) { next(error); }
 });
@@ -126,7 +133,7 @@ router.patch('/change-password', authMiddleware, async (request: AuthRequest, re
   try {
     const input = changePasswordSchema.parse(request.body);
     const [rows] = await db.query<RowDataPacket[]>(
-      'SELECT id, password_hash AS passwordHash FROM users WHERE id = ? LIMIT 1',
+      'SELECT id, passwordHash FROM `User` WHERE id = ? LIMIT 1',
       [request.user!.id],
     );
     const user = rows[0];
@@ -134,7 +141,7 @@ router.patch('/change-password', authMiddleware, async (request: AuthRequest, re
       response.status(400).json({ message: 'Mot de passe actuel incorrect.' });
       return;
     }
-    await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [await bcrypt.hash(input.newPassword, 12), user.id]);
+    await db.query('UPDATE `User` SET passwordHash = ? WHERE id = ?', [await bcrypt.hash(input.newPassword, 12), user.id]);
     response.json({ message: 'Mot de passe modifié.' });
   } catch (error) { next(error); }
 });
@@ -147,12 +154,12 @@ usersRouter.delete('/users/:id', authMiddleware, requireRole('gerant'), async (r
       return;
     }
     const f = magasinFilter(request);
-    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM users WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
+    const [found] = await db.query<RowDataPacket[]>(`SELECT id FROM \`User\` WHERE id = ?${f.sql} LIMIT 1`, [id, ...f.params]);
     if (!found[0]) {
       response.status(404).json({ message: 'Utilisateur introuvable.' });
       return;
     }
-    await db.query('UPDATE users SET actif = 0 WHERE id = ?', [id]);
+    await db.query('UPDATE `User` SET actif = 0 WHERE id = ?', [id]);
     response.status(204).send();
   } catch (error) { next(error); }
 });

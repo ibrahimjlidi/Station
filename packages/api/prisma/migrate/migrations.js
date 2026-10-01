@@ -51,8 +51,41 @@ async function migrate() {
     const migrationFolders = fs
       .readdirSync(migrationsPath, { withFileTypes: true })
       .filter((item) => item.isDirectory())
+      .filter((item) =>
+        fs.existsSync(path.join(migrationsPath, item.name, "migration.sql"))
+      )
       .map((item) => item.name)
       .sort();
+
+    const [legacyHistoryTables] = await connection.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+        AND table_name = '_prisma_migrations'
+    `);
+
+    if (legacyHistoryTables.length > 0) {
+      const [legacyRows] = await connection.query(`
+        SELECT migration_name
+        FROM _prisma_migrations
+        WHERE finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+      `);
+      const legacyApplied = new Set(
+        legacyRows.map((row) => row.migration_name)
+      );
+
+      for (const migration of migrationFolders) {
+        if (legacyApplied.has(migration)) {
+          await connection.query(
+            `INSERT IGNORE INTO _migrations (migration) VALUES (?)`,
+            [migration]
+          );
+        }
+      }
+
+      console.log('📋 Historique MySQL existant repris');
+    }
 
     console.log(
       `📦 ${migrationFolders.length} migration(s) trouvée(s)`

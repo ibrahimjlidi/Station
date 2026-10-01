@@ -45,5 +45,5 @@ export const listFilterSchema = z.object({
   fournisseurId: id.optional(),
 });
 
-export const avoirSchema = z.object({ fournisseurId: id, dateAchat: date, numFacture: z.string().trim().max(80).optional(), totalTTC: money });
+export const avoirSchema = z.object({ fournisseurId: id, dateAchat: date, numFacture: z.string().trim().max(80).optional(), totalTTC: money, valide: z.boolean().default(false) });
 export const imputationSchema = z.object({ montant: money });

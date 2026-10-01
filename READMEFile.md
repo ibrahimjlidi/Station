@@ -1,6 +1,6 @@
 # Station Service ERP
 
-Monorepo pnpm pour la gestion d'une station-service: API Express/Prisma/MySQL et interface React/Ant Design.
+Monorepo pnpm pour la gestion d'une station-service: API Express/mysql2/MySQL et interface React/Ant Design.
 
 ## Prerequis
 
@@ -21,39 +21,19 @@ Copy-Item packages/api/.env.example packages/api/.env
 Copy-Item packages/web/.env.example packages/web/.env
 ```
 
-Adapter `DATABASE_URL` dans `packages/api/.env`, puis generer le client et appliquer la premiere migration:
+Adapter les variables `DB_*` dans `packages/api/.env`, puis appliquer les migrations SQL existantes:
 
 ```bash
-pnpm --filter @station/api prisma:generate
-pnpm --filter @station/api prisma:migrate -- --name init
+pnpm --filter @station/api migrate
 ```
 
-Pour appliquer les modules suivants et initialiser les taux tunisiens de retenue à la source:
+Initialiser la station, le magasin, les équipes, les caisses, l'administrateur et les référentiels de base:
 
 ```bash
-pnpm --filter @station/api prisma:migrate -- --name add_caisse_module
-pnpm --filter @station/api prisma:migrate -- --name add_clients_fournisseurs
-pnpm --filter @station/api prisma:seed
+pnpm --filter @station/api seed
 ```
 
-Pour Banque & Boutique, la migration demandee est:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_banque_boutique
-```
-
-Si Prisma affiche une confirmation interactive dans PowerShell, generer puis appliquer sans prompt:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_banque_boutique --create-only
-pnpm --filter @station/api exec prisma migrate deploy
-```
-
-La migration finale demandee est:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_rapports_finitions
-```
+Le runner applique automatiquement toutes les migrations SQL versionnees qui n'ont pas encore ete executees. En local, le seed utilise `admin` / `admin123`; changez ce mot de passe avant une mise en production.
 
 ## Checklist fonctionnelle
 
@@ -100,5 +80,5 @@ Le premier utilisateur peut etre cree par `POST /auth/register` avec `username`,
 
 - `pnpm build`: construit l'API et le frontend
 - `pnpm typecheck`: verifie les types des deux packages
-- `pnpm db:generate`: regenere le client Prisma
-- `pnpm db:migrate`: lance Prisma Migrate dans l'API
+- `pnpm db:migrate`: applique les migrations SQL MySQL de l'API
+- `pnpm --filter @station/api seed`: initialise les donnees de reference

@@ -200,7 +200,7 @@ router.post(
       const input = familleDepenseSchema.parse(request.body);
 
       const columns = Object.keys(input);
-      const values = Object.values(input);
+      const values: unknown[] = Object.values(input);
 
       if (!columns.length) {
         response.status(400).json({
@@ -252,7 +252,7 @@ router.put(
       const input = familleDepenseSchema.parse(request.body);
 
       const columns = Object.keys(input);
-      const values = Object.values(input);
+      const values: unknown[] = Object.values(input);
 
       if (!columns.length) {
         response.status(400).json({

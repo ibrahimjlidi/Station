@@ -19,8 +19,8 @@ export const fermerSchema = z.object({
 const code = z.string().trim().min(1).max(30);
 const label = z.string().trim().min(1).max(100);
 
-export const equipeSchema = z.object({ code, libelle: label });
-export const caisseSchema = z.object({ code, libelle: label });
+export const equipeSchema = z.object({ code, libelle: label, actif: z.boolean().default(true) });
+export const caisseSchema = z.object({ code, libelle: label, actif: z.boolean().default(true) });
 export const cuveSchema = z.object({
   code,
   libelle: label,

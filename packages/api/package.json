@@ -10,8 +10,6 @@
     "migrate": "node prisma/migrate/migrations.js",
     "seed": "node scripts/seed.js"
   },
-  "prisma": {
-  },
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
