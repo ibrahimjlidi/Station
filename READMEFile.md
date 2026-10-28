@@ -1,6 +1,6 @@
 # Station Service ERP
 
-Monorepo pnpm pour la gestion d'une station-service: API Express/Prisma/MySQL et interface React/Ant Design.
+Monorepo pnpm pour la gestion d'une station-service: API Express/mysql2/MySQL et interface React/Ant Design.
 
 ## Prerequis
 
@@ -21,45 +21,19 @@ Copy-Item packages/api/.env.example packages/api/.env
 Copy-Item packages/web/.env.example packages/web/.env
 ```
 
-Adapter `DATABASE_URL` dans `packages/api/.env`, puis generer le client et appliquer la premiere migration:
+Configurer les variables `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` et `DB_PORT` dans `packages/api/.env`. Créer la base dans phpMyAdmin puis appliquer les migrations SQL dans `packages/api/sql/migrations/`, dans l'ordre des préfixes de dossiers:
 
 ```bash
-pnpm --filter @station/api prisma:generate
-pnpm --filter @station/api prisma:migrate -- --name init
+ls packages/api/sql/migrations
 ```
 
-Pour appliquer les modules suivants et initialiser les taux tunisiens de retenue à la source:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_caisse_module
-pnpm --filter @station/api prisma:migrate -- --name add_clients_fournisseurs
-pnpm --filter @station/api prisma:seed
-```
-
-Pour Banque & Boutique, la migration demandee est:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_banque_boutique
-```
-
-Si Prisma affiche une confirmation interactive dans PowerShell, generer puis appliquer sans prompt:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_banque_boutique --create-only
-pnpm --filter @station/api exec prisma migrate deploy
-```
-
-La migration finale demandee est:
-
-```bash
-pnpm --filter @station/api prisma:migrate -- --name add_rapports_finitions
-```
+Importer le contenu de chaque `migration.sql` dans phpMyAdmin. Les migrations sont des instructions MySQL natives; ne les réexécutez pas sur une base déjà migrée.
 
 ## Checklist fonctionnelle
 
 ### API
 
-- Auth: `POST /auth/login`, `POST /auth/register`
+- Auth: `POST /auth/login`; bootstrap du premier gérant via phpMyAdmin, puis gestion des comptes avec les routes protégées `/users`.
 - Carburant: `GET /cuves`, `GET /pompes`, `GET /equipes`, `GET /caisses`, `GET /vendeurs`, `GET /releves`, `POST /pompes/relever`, `PATCH /pompes/relever/:id/fermer`, `GET /cuves/stock`
 - Caisse: sessions et lignes `POST /caisse/recettes`, `POST /caisse/recettes/:id/lignes`, `POST /caisse/depenses`, `POST /caisse/depenses/:id/lignes`, `POST /caisse/credits`, `POST /caisse/credits/:id/lignes`, `POST /caisse/cloturer`, `GET /caisse/resume/:date/:equipeId/:caisseId`
 - Clients: `GET|POST /clients`, `GET|PUT /clients/:id`, `GET|POST /bons-livraison`, `POST /bons-livraison/:id/facturer`, `GET /factures`, `POST /reglements`, `GET /impayes`, `GET /produits`
@@ -100,5 +74,3 @@ Le premier utilisateur peut etre cree par `POST /auth/register` avec `username`,
 
 - `pnpm build`: construit l'API et le frontend
 - `pnpm typecheck`: verifie les types des deux packages
-- `pnpm db:generate`: regenere le client Prisma
-- `pnpm db:migrate`: lance Prisma Migrate dans l'API

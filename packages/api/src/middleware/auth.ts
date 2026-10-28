@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
-import type { Role } from '@prisma/client';
+
+export type Role = 'gerant' | 'caissier' | 'vendeur';
 
 export interface AuthUser {
   id: number;

@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
+import { execute, insertRecord, query, queryOne, withTransaction, type SqlRow, type SqlValue } from '../../lib/db.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { carWashSchema, entretienSchema, serviceSchema, vehiculeSchema } from './entretien.schema.js';
 
@@ -8,18 +7,188 @@ const router = Router();
 const access = [requireAuth];
 const write = [requireAuth, requireRole('caissier', 'gerant')];
 const toDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
-const n = (value: Prisma.Decimal) => Number(value);
-router.get('/entretiens', ...access, async (_request, response, next) => { try { const rows = await prisma.entretien.findMany({ include: { client: true }, orderBy: { dateEnt: 'desc' } }); response.json(rows.map((row) => ({ ...row, totEntTTC: n(row.totEntTTC), indexKm: n(row.indexKm), prochainIndex: n(row.prochainIndex), client: { id: row.client.id, nomClient: row.client.nomClient } }))); } catch (error) { next(error); } });
-router.post('/entretiens', ...write, async (request, response, next) => { try { const input = entretienSchema.parse(request.body); const vehicle = input.vehiculeId ? await prisma.vehicule.findFirst({ where: { id: input.vehiculeId, clientId: input.clientId } }) : await prisma.vehicule.upsert({ where: { clientId_matricule: { clientId: input.clientId, matricule: input.matricule } }, create: { clientId: input.clientId, matricule: input.matricule }, update: {} }); if (!vehicle) { response.status(400).json({ message: 'Vehicule introuvable pour ce client.' }); return; } const catalog = await prisma.service.findMany({ where: { id: { in: input.lignes.flatMap((line) => line.serviceId ? [line.serviceId] : []) }, actif: true } }); const serviceMap = new Map(catalog.map((service) => [service.id, service])); const lines = input.lignes.map((line) => { const service = line.serviceId ? serviceMap.get(line.serviceId) : undefined; const prixHT = service ? Number(service.prixHT) : line.prixHT!; const tauxTVA = service ? Number(service.tauxTVA) : line.tauxTVA!; return { idService: line.idService, serviceId: line.serviceId, prixHT, tauxTVA, prixTTC: prixHT * (1 + tauxTVA / 100) }; }); const total = lines.reduce((sum, line) => sum + line.prixTTC, 0); const row = await prisma.entretien.create({ data: { dateEnt: toDate(input.dateEnt), matricule: input.matricule, clientId: input.clientId, vehiculeId: vehicle.id, indexKm: new Prisma.Decimal(input.indexKm), prochainIndex: new Prisma.Decimal(input.prochainIndex), totEntTTC: new Prisma.Decimal(total), details: { create: lines.map((line, index) => ({ idService: line.idService, serviceId: line.serviceId, prixHT: new Prisma.Decimal(line.prixHT), prixTTC: new Prisma.Decimal(line.prixTTC), numLigne: index + 1 })) } }, include: { client: true, details: { include: { serviceCatalog: true } } } }); response.status(201).json({ ...row, totEntTTC: n(row.totEntTTC) }); } catch (error) { next(error); } });
-router.get('/entretiens/:id', ...access, async (request, response, next) => { try { const row = await prisma.entretien.findUnique({ where: { id: Number(request.params.id) }, include: { client: true, details: { include: { service: true } } } }); if (!row) { response.status(404).json({ message: 'Entretien introuvable.' }); return; } response.json({ ...row, totEntTTC: n(row.totEntTTC), indexKm: n(row.indexKm), prochainIndex: n(row.prochainIndex), details: row.details.map((line) => ({ ...line, prixHT: n(line.prixHT), prixTTC: n(line.prixTTC) })) }); } catch (error) { next(error); } });
-router.get('/carwash', ...access, async (_request, response, next) => { try { const rows = await prisma.carWash.findMany({ orderBy: { date: 'desc' } }); response.json(rows.map((row) => ({ ...row, indexOuverture: n(row.indexOuverture), indexFermeture: n(row.indexFermeture), nombreLavage: n(row.nombreLavage) }))); } catch (error) { next(error); } });
-router.post('/carwash', ...write, async (request, response, next) => { try { const input = carWashSchema.parse(request.body); if (input.indexFermeture < input.indexOuverture) { response.status(400).json({ message: 'Index fermeture invalide.' }); return; } const row = await prisma.carWash.upsert({ where: { date: toDate(input.date) }, create: { date: toDate(input.date), indexOuverture: new Prisma.Decimal(input.indexOuverture), indexFermeture: new Prisma.Decimal(input.indexFermeture), nombreLavage: new Prisma.Decimal(input.indexFermeture - input.indexOuverture) }, update: { indexOuverture: new Prisma.Decimal(input.indexOuverture), indexFermeture: new Prisma.Decimal(input.indexFermeture), nombreLavage: new Prisma.Decimal(input.indexFermeture - input.indexOuverture) } }); response.status(201).json(row); } catch (error) { next(error); } });
-router.get('/vehicules', ...access, async (request, response, next) => { try { const rows = await prisma.vehicule.findMany({ where: request.query.clientId ? { clientId: Number(request.query.clientId) } : undefined, include: { client: true }, orderBy: { matricule: 'asc' } }); response.json(rows.map((row) => ({ ...row, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel), client: { id: row.client.id, nomClient: row.client.nomClient } }))); } catch (error) { next(error); } });
-router.post('/vehicules', ...write, async (request, response, next) => { try { const input = vehiculeSchema.parse(request.body); const row = await prisma.vehicule.create({ data: { ...input, indexKmActuel: input.indexKmActuel == null ? undefined : BigInt(input.indexKmActuel) }, include: { client: true } }); response.status(201).json({ ...row, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel) }); } catch (error) { next(error); } });
-router.put('/vehicules/:id', ...write, async (request, response, next) => { try { const input = vehiculeSchema.partial().parse(request.body); const row = await prisma.vehicule.update({ where: { id: Number(request.params.id) }, data: { ...input, indexKmActuel: input.indexKmActuel == null ? undefined : BigInt(input.indexKmActuel) }, include: { client: true } }); response.json({ ...row, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel) }); } catch (error) { next(error); } });
-router.get('/vehicules/:id/historique', ...access, async (request, response, next) => { try { const row = await prisma.vehicule.findUnique({ where: { id: Number(request.params.id) }, include: { entretiens: { orderBy: { dateEnt: 'desc' }, include: { details: { include: { serviceCatalog: true } } } } } }); if (!row) { response.status(404).json({ message: 'Vehicule introuvable.' }); return; } response.json({ ...row, entretiens: row.entretiens.map((item) => ({ ...item, totEntTTC: n(item.totEntTTC), indexKm: n(item.indexKm), prochainIndex: n(item.prochainIndex), details: item.details.map((line) => ({ ...line, prixHT: n(line.prixHT), prixTTC: n(line.prixTTC) })) })) }); } catch (error) { next(error); } });
-router.get('/services', ...access, async (_request, response, next) => { try { const rows = await prisma.service.findMany({ where: { actif: true }, orderBy: { libelle: 'asc' } }); response.json(rows.map((row) => ({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) }))); } catch (error) { next(error); } });
-router.post('/services', requireAuth, requireRole('gerant'), async (request, response, next) => { try { const input = serviceSchema.parse(request.body); const row = await prisma.service.create({ data: { ...input, prixHT: new Prisma.Decimal(input.prixHT), tauxTVA: new Prisma.Decimal(input.tauxTVA), prixTTC: new Prisma.Decimal(input.prixHT * (1 + input.tauxTVA / 100)) } }); response.status(201).json({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) }); } catch (error) { next(error); } });
-router.put('/services/:id', requireAuth, requireRole('gerant'), async (request, response, next) => { try { const input = serviceSchema.partial().parse(request.body); const current = await prisma.service.findUnique({ where: { id: Number(request.params.id) } }); if (!current) { response.status(404).json({ message: 'Service introuvable.' }); return; } const prixHT = input.prixHT ?? Number(current.prixHT); const tauxTVA = input.tauxTVA ?? Number(current.tauxTVA); const row = await prisma.service.update({ where: { id: current.id }, data: { ...input, prixHT: new Prisma.Decimal(prixHT), tauxTVA: new Prisma.Decimal(tauxTVA), prixTTC: new Prisma.Decimal(prixHT * (1 + tauxTVA / 100)) } }); response.json({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) }); } catch (error) { next(error); } });
-router.patch('/services/:id/toggle', requireAuth, requireRole('gerant'), async (request, response, next) => { try { const current = await prisma.service.findUnique({ where: { id: Number(request.params.id) } }); if (!current) { response.status(404).json({ message: 'Service introuvable.' }); return; } response.json(await prisma.service.update({ where: { id: current.id }, data: { actif: !current.actif } })); } catch (error) { next(error); } });
+const n = (value: unknown) => Number(value ?? 0);
+
+router.get('/entretiens', ...access, async (_request, response, next) => {
+  try {
+    const rows = await query('SELECT e.*, c.nomClient FROM `Entretien` e JOIN `Client` c ON c.id = e.clientId ORDER BY e.dateEnt DESC');
+    response.json(rows.map((row) => ({ ...row, totEntTTC: n(row.totEntTTC), indexKm: n(row.indexKm), prochainIndex: n(row.prochainIndex), client: { id: row.clientId, nomClient: row.nomClient } })));
+  } catch (error) { next(error); }
+});
+
+router.post('/entretiens', ...write, async (request, response, next) => {
+  try {
+    const input = entretienSchema.parse(request.body);
+    const vehicle = input.vehiculeId
+      ? await queryOne('SELECT * FROM `Vehicule` WHERE id = ? AND clientId = ?', [input.vehiculeId, input.clientId])
+      : await queryOne('SELECT * FROM `Vehicule` WHERE clientId = ? AND matricule = ?', [input.clientId, input.matricule]);
+    if (input.vehiculeId && !vehicle) { response.status(400).json({ message: 'Vehicule introuvable pour ce client.' }); return; }
+    let vehicleId = vehicle?.id as number | undefined;
+    if (!vehicleId) {
+      vehicleId = await insertRecord('Vehicule', { clientId: input.clientId, matricule: input.matricule });
+    }
+
+    const serviceIds = [...new Set(input.lignes.flatMap((line) => line.serviceId ? [line.serviceId] : []))];
+    const catalog = serviceIds.length
+      ? await query(`SELECT * FROM \`Service\` WHERE actif = ? AND id IN (${serviceIds.map(() => '?').join(', ')})`, [true, ...serviceIds])
+      : [];
+    const serviceMap = new Map(catalog.map((service) => [Number(service.id), service]));
+    const lines = input.lignes.map((line) => {
+      const service = line.serviceId ? serviceMap.get(line.serviceId) : undefined;
+      if (line.serviceId && !service) throw new Error(`Active service ${line.serviceId} was not found.`);
+      const prixHT = service ? n(service.prixHT) : line.prixHT!;
+      const tauxTVA = service ? n(service.tauxTVA) : line.tauxTVA!;
+      return { idService: line.idService, serviceId: line.serviceId, prixHT, tauxTVA, prixTTC: prixHT * (1 + tauxTVA / 100) };
+    });
+    const total = lines.reduce((sum, line) => sum + line.prixTTC, 0);
+    const row = await withTransaction<SqlRow & { details: SqlRow[] }>(async (connection) => {
+      const id = await insertRecord('Entretien', { dateEnt: toDate(input.dateEnt), matricule: input.matricule, clientId: input.clientId, vehiculeId: vehicleId, indexKm: input.indexKm, prochainIndex: input.prochainIndex, totEntTTC: total }, connection);
+      for (const [index, line] of lines.entries()) {
+        await insertRecord('Detentretien', { entretienId: id, idService: line.idService, serviceId: line.serviceId, prixHT: line.prixHT, prixTTC: line.prixTTC, numLigne: index + 1 }, connection);
+      }
+      const entretien = await queryOne('SELECT e.*, c.nomClient FROM `Entretien` e JOIN `Client` c ON c.id = e.clientId WHERE e.id = ?', [id], connection);
+      const details = await query('SELECT d.*, s.libelle AS catalogLibelle FROM `Detentretien` d LEFT JOIN `Service` s ON s.id = d.serviceId WHERE d.entretienId = ? ORDER BY d.numLigne', [id], connection);
+      if (!entretien) throw new Error('Created maintenance record could not be loaded.');
+      return { ...entretien, details };
+    });
+    response.status(201).json({ ...row, totEntTTC: n(row.totEntTTC) });
+  } catch (error) { next(error); }
+});
+
+router.get('/entretiens/:id', ...access, async (request, response, next) => {
+  try {
+    const id = Number(request.params.id);
+    const row = await queryOne('SELECT e.*, c.nomClient FROM `Entretien` e JOIN `Client` c ON c.id = e.clientId WHERE e.id = ?', [id]);
+    if (!row) { response.status(404).json({ message: 'Entretien introuvable.' }); return; }
+    const details = await query('SELECT d.*, p.code AS serviceCode, p.libelle AS serviceLibelle FROM `Detentretien` d LEFT JOIN `Produit` p ON p.id = d.idService WHERE d.entretienId = ? ORDER BY d.numLigne', [id]);
+    response.json({
+      ...row,
+      client: { id: row.clientId, nomClient: row.nomClient },
+      totEntTTC: n(row.totEntTTC),
+      indexKm: n(row.indexKm),
+      prochainIndex: n(row.prochainIndex),
+      details: details.map((line) => ({ ...line, service: line.idService == null ? null : { id: line.idService, code: line.serviceCode, libelle: line.serviceLibelle }, prixHT: n(line.prixHT), prixTTC: n(line.prixTTC) })),
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/carwash', ...access, async (_request, response, next) => {
+  try {
+    const rows = await query('SELECT * FROM `CarWash` ORDER BY date DESC');
+    response.json(rows.map((row) => ({ ...row, indexOuverture: n(row.indexOuverture), indexFermeture: n(row.indexFermeture), nombreLavage: n(row.nombreLavage) })));
+  } catch (error) { next(error); }
+});
+
+router.post('/carwash', ...write, async (request, response, next) => {
+  try {
+    const input = carWashSchema.parse(request.body);
+    if (input.indexFermeture < input.indexOuverture) { response.status(400).json({ message: 'Index fermeture invalide.' }); return; }
+    const date = toDate(input.date);
+    await execute('INSERT INTO `CarWash` (date, indexOuverture, indexFermeture, nombreLavage, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE indexOuverture = VALUES(indexOuverture), indexFermeture = VALUES(indexFermeture), nombreLavage = VALUES(nombreLavage), updatedAt = VALUES(updatedAt)', [date, input.indexOuverture, input.indexFermeture, input.indexFermeture - input.indexOuverture, new Date(), new Date()]);
+    const row = await queryOne('SELECT * FROM `CarWash` WHERE date = ?', [date]);
+    if (!row) throw new Error('Car wash record could not be loaded.');
+    response.status(201).json(row);
+  } catch (error) { next(error); }
+});
+
+router.get('/vehicules', ...access, async (request, response, next) => {
+  try {
+    const values: SqlValue[] = [];
+    const filter = request.query.clientId ? ' WHERE v.clientId = ?' : '';
+    if (request.query.clientId) values.push(Number(request.query.clientId));
+    const rows = await query(`SELECT v.*, c.nomClient FROM \`Vehicule\` v JOIN \`Client\` c ON c.id = v.clientId${filter} ORDER BY v.matricule`, values);
+    response.json(rows.map((row) => ({ ...row, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel), client: { id: row.clientId, nomClient: row.nomClient } })));
+  } catch (error) { next(error); }
+});
+
+router.post('/vehicules', ...write, async (request, response, next) => {
+  try {
+    const input = vehiculeSchema.parse(request.body);
+    const id = await insertRecord('Vehicule', { ...input, indexKmActuel: input.indexKmActuel == null ? undefined : BigInt(input.indexKmActuel) });
+    const row = await queryOne('SELECT v.*, c.nomClient FROM `Vehicule` v JOIN `Client` c ON c.id = v.clientId WHERE v.id = ?', [id]);
+    if (!row) throw new Error('Inserted vehicle could not be loaded.');
+    response.status(201).json({ ...row, client: { id: row.clientId, nomClient: row.nomClient }, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel) });
+  } catch (error) { next(error); }
+});
+
+router.put('/vehicules/:id', ...write, async (request, response, next) => {
+  try {
+    const input = vehiculeSchema.partial().parse(request.body);
+    const id = Number(request.params.id);
+    const values = { ...input, indexKmActuel: input.indexKmActuel == null ? input.indexKmActuel : BigInt(input.indexKmActuel) } as Record<string, SqlValue | undefined>;
+    const fields = Object.entries(values).filter((entry) => entry[1] !== undefined);
+    if (fields.length) {
+      const sql = fields.map(([field]) => `\`${field}\` = ?`).join(', ');
+      await execute(`UPDATE \`Vehicule\` SET ${sql}, updatedAt = ? WHERE id = ?`, [...fields.map(([, value]) => value!), new Date(), id]);
+    }
+    const row = await queryOne('SELECT v.*, c.nomClient FROM `Vehicule` v JOIN `Client` c ON c.id = v.clientId WHERE v.id = ?', [id]);
+    if (!row) { response.status(404).json({ message: 'Vehicule introuvable.' }); return; }
+    response.json({ ...row, client: { id: row.clientId, nomClient: row.nomClient }, indexKmActuel: row.indexKmActuel == null ? null : Number(row.indexKmActuel) });
+  } catch (error) { next(error); }
+});
+
+router.get('/vehicules/:id/historique', ...access, async (request, response, next) => {
+  try {
+    const id = Number(request.params.id);
+    const vehicle = await queryOne('SELECT * FROM `Vehicule` WHERE id = ?', [id]);
+    if (!vehicle) { response.status(404).json({ message: 'Vehicule introuvable.' }); return; }
+    const entretiens = await query('SELECT * FROM `Entretien` WHERE vehiculeId = ? ORDER BY dateEnt DESC', [id]);
+    const details = await Promise.all(entretiens.map((item) => query('SELECT d.*, s.libelle AS catalogLibelle FROM `Detentretien` d LEFT JOIN `Service` s ON s.id = d.serviceId WHERE d.entretienId = ? ORDER BY d.numLigne', [item.id])));
+    response.json({
+      ...vehicle,
+      indexKmActuel: vehicle.indexKmActuel == null ? null : Number(vehicle.indexKmActuel),
+      entretiens: entretiens.map((item, index) => ({
+        ...item,
+        totEntTTC: n(item.totEntTTC),
+        indexKm: n(item.indexKm),
+        prochainIndex: n(item.prochainIndex),
+        details: details[index].map((line) => ({ ...line, serviceCatalog: line.serviceId == null ? null : { id: line.serviceId, libelle: line.catalogLibelle }, prixHT: n(line.prixHT), prixTTC: n(line.prixTTC) })),
+      })),
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/services', ...access, async (_request, response, next) => {
+  try { const rows = await query('SELECT * FROM `Service` WHERE actif = ? ORDER BY libelle', [true]); response.json(rows.map((row) => ({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) }))); } catch (error) { next(error); }
+});
+
+router.post('/services', requireAuth, requireRole('gerant'), async (request, response, next) => {
+  try {
+    const input = serviceSchema.parse(request.body);
+    const id = await insertRecord('Service', { ...input, prixTTC: input.prixHT * (1 + input.tauxTVA / 100) });
+    const row = await queryOne('SELECT * FROM `Service` WHERE id = ?', [id]);
+    if (!row) throw new Error('Inserted service could not be loaded.');
+    response.status(201).json({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) });
+  } catch (error) { next(error); }
+});
+
+router.put('/services/:id', requireAuth, requireRole('gerant'), async (request, response, next) => {
+  try {
+    const input = serviceSchema.partial().parse(request.body);
+    const id = Number(request.params.id);
+    const current = await queryOne('SELECT * FROM `Service` WHERE id = ?', [id]);
+    if (!current) { response.status(404).json({ message: 'Service introuvable.' }); return; }
+    const prixHT = input.prixHT ?? n(current.prixHT);
+    const tauxTVA = input.tauxTVA ?? n(current.tauxTVA);
+    const fields = { ...input, prixHT, tauxTVA, prixTTC: prixHT * (1 + tauxTVA / 100) };
+    const assignments = Object.keys(fields).map((field) => `\`${field}\` = ?`).join(', ');
+    await execute(`UPDATE \`Service\` SET ${assignments}, updatedAt = ? WHERE id = ?`, [...Object.values(fields), new Date(), id]);
+    const row = await queryOne('SELECT * FROM `Service` WHERE id = ?', [id]);
+    if (!row) throw new Error('Updated service could not be loaded.');
+    response.json({ ...row, prixHT: n(row.prixHT), tauxTVA: n(row.tauxTVA), prixTTC: n(row.prixTTC) });
+  } catch (error) { next(error); }
+});
+
+router.patch('/services/:id/toggle', requireAuth, requireRole('gerant'), async (request, response, next) => {
+  try {
+    const id = Number(request.params.id);
+    const current = await queryOne('SELECT actif FROM `Service` WHERE id = ?', [id]);
+    if (!current) { response.status(404).json({ message: 'Service introuvable.' }); return; }
+    await execute('UPDATE `Service` SET actif = ?, updatedAt = ? WHERE id = ?', [!current.actif, new Date(), id]);
+    const row = await queryOne('SELECT * FROM `Service` WHERE id = ?', [id]);
+    if (!row) throw new Error('Updated service could not be loaded.');
+    response.json(row);
+  } catch (error) { next(error); }
+});
+
 export default router;

@@ -2,12 +2,19 @@ services:
   - type: web
     name: station-api
     runtime: node
-    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @station/api prisma:generate && pnpm --filter @station/api build
-    preDeployCommand: pnpm --filter @station/api exec prisma migrate deploy
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @station/api build
     startCommand: pnpm --filter @station/api start
     healthCheckPath: /health
     envVars:
-      - key: DATABASE_URL
+      - key: DB_HOST
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_PORT
         sync: false
       - key: JWT_SECRET
         sync: false

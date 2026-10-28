@@ -1,0 +1,13 @@
+.git
+.github
+.vscode
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/.vite
+**/.env
+**/.env.*
+!.env.docker.example
+**/*.log
+**/*.tsbuildinfo

@@ -4,7 +4,7 @@ Station El Amal est une application ERP full-stack pour gérer une station-servi
 
 [![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/) [![pnpm](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![MySQL 8](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/) [![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 
-**Built with:** Express · Prisma · React · Vite · Ant Design · TanStack Query · Zustand · Docker · MySQL
+**Built with:** Express · mysql2 · React · Vite · Ant Design · TanStack Query · Zustand · Docker · MySQL
 
 ## Table of Contents
 
@@ -44,7 +44,7 @@ Station El Amal est une application ERP full-stack pour gérer une station-servi
 npm install -g pnpm
 ```
 
-- [MySQL](https://www.mysql.com/) 8.0, ou un serveur MySQL équivalent accessible par l'URL Prisma.
+- [MySQL](https://www.mysql.com/) 8.0, ou un serveur MySQL équivalent. phpMyAdmin est facultatif et peut servir à administrer la base.
 - Git
 
 ## Project Structure
@@ -52,15 +52,12 @@ npm install -g pnpm
 ```text
 station-service/
 ├── packages/
-│   ├── api/                         # Express + Prisma backend, port 4000
-│   │   ├── prisma/
-│   │   │   ├── schema.prisma        # Schéma MySQL Prisma
-│   │   │   ├── migrations/          # Fichiers de migration
-│   │   │   └── seed.ts               # Données de démonstration
+│   ├── api/                         # Express + mysql2 backend, port 4000
+│   │   ├── sql/migrations/          # Migrations SQL MySQL à appliquer dans l'ordre
 │   │   ├── src/
 │   │   │   ├── modules/              # Modules métier et routes API
 │   │   │   ├── middleware/           # Authentification et gestion d'erreurs
-│   │   │   ├── lib/                  # Prisma, PDF et utilitaires
+│   │   │   ├── lib/                  # Pool mysql2, PDF et utilitaires
 │   │   │   └── index.ts              # Point d'entrée Express
 │   │   ├── .env                      # Non versionné, à créer depuis .env.example
 │   │   └── package.json
@@ -106,7 +103,11 @@ cp .env.example .env
 Configurez ensuite `packages/api/.env` :
 
 ```env
-DATABASE_URL="mysql://root:yourpassword@localhost:3306/station_service"
+DB_HOST="127.0.0.1"
+DB_USER="station"
+DB_PASSWORD="change-this-password"
+DB_NAME="station_service"
+DB_PORT=3306
 JWT_SECRET="change-this-to-a-long-random-string-minimum-32-chars"
 PORT=4000
 CORS_ORIGIN="http://localhost:5173"
@@ -144,32 +145,17 @@ CREATE DATABASE station_service CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 EXIT;
 ```
 
-Le nom, l'utilisateur, le port et le mot de passe doivent correspondre à `DATABASE_URL`.
+Créez la base et l'utilisateur dans phpMyAdmin (ou avec le client MySQL). Les cinq variables `DB_*` doivent correspondre à cette base et à son compte.
 
-### 6. Run Prisma migrations
+### 6. Apply the MySQL migrations
 
-```bash
-cd ../api
-pnpm prisma migrate dev
-```
+Importez les fichiers SQL de `packages/api/sql/migrations/` dans phpMyAdmin, dans l'ordre alphabétique des dossiers de migration (les préfixes sont des horodatages). Ne réimportez pas une migration déjà appliquée. `station_service.sql` est un ancien dump de compatibilité et ne constitue pas le schéma courant de l'application.
 
-Cette commande crée les tables et applique les migrations disponibles.
+### 7. Add optional demo data
 
-### 7. Generate Prisma Client
+Après avoir appliqué toutes les migrations, importez `packages/api/sql/seed.sql` dans phpMyAdmin pour ajouter des données de démonstration. Le script peut être relancé sans supprimer les enregistrements opérationnels. Les noms et les prix fournis sont des exemples : remplacez-les par vos données réelles avant utilisation.
 
-```bash
-pnpm prisma generate
-```
-
-### 8. Seed the database
-
-```bash
-pnpm prisma db seed
-```
-
-Le seed est rejouable et affiche un tableau récapitulatif. Il crée notamment 4 utilisateurs, 5 fournisseurs, 6 clients, 4 cuves, 6 pompes, 18 produits techniques et boutique, des opérations de caisse sur 7 jours, des achats, factures, mouvements bancaires et entretiens.
-
-### 9. Start the API server
+### 8. Start the API server
 
 ```bash
 pnpm dev
@@ -191,7 +177,7 @@ curl http://localhost:4000/health
 
 Réponse attendue : `{"status":"ok"}`.
 
-### 10. Start the React frontend
+### 9. Start the React frontend
 
 Ouvrez un second terminal :
 
@@ -202,16 +188,22 @@ pnpm dev
 
 Ouvrez ensuite [http://localhost:5173](http://localhost:5173).
 
-### 11. Log in
+### 10. Create the first user
 
-Comptes créés par le seed :
+L'API n'expose pas d'inscription publique. Générez un hash bcrypt pour un mot de passe choisi dans `packages/api` :
 
-| Username | Password | Role |
-|---|---|---|
-| `admin` | `Admin123!` | Gérant |
-| `caissier1` | `Caisse123!` | Caissier |
-| `caissier2` | `Caisse123!` | Caissier |
-| `vendeur1` | `Vendeur123!` | Vendeur |
+```bash
+node --input-type=module -e 'import bcrypt from "bcryptjs"; console.log(await bcrypt.hash(process.argv[1], 12))' 'CHOOSE_A_STRONG_PASSWORD'
+```
+
+Insérez le compte gérant dans phpMyAdmin en remplaçant `PASTE_BCRYPT_HASH` par le résultat :
+
+```sql
+INSERT INTO `User` (`magasinId`, `username`, `passwordHash`, `nom`, `prenom`, `role`, `actif`, `createdAt`, `updatedAt`)
+VALUES (NULL, 'admin', 'PASTE_BCRYPT_HASH', 'Administrateur', 'Admin', 'gerant', TRUE, NOW(3), NOW(3));
+```
+
+Connectez-vous avec le mot de passe choisi. Ne stockez pas le mot de passe en clair dans la base.
 
 ## Running Both Packages
 
@@ -230,23 +222,42 @@ pnpm --filter @station/web dev
 
 ## Docker Deployment
 
-Le dépôt actuel ne contient pas encore de `Dockerfile` ni de `docker-compose.yml`. Docker peut être ajouté comme étape de déploiement, mais les commandes ci-dessous ne sont pas exécutables tant que ces fichiers n'ont pas été ajoutés.
+La stack Docker Compose lance MySQL 8.4, l'API Express et le frontend Nginx dans des conteneurs séparés. phpMyAdmin est également disponible pour administrer la base depuis un navigateur.
 
-Pour un déploiement Docker complet, la stack devra fournir :
+1. Installez Docker avec le plugin Docker Compose, puis créez le fichier de configuration local :
 
-- un conteneur MySQL 8 avec un volume persistant ;
-- un conteneur API exposant le port 4000 ;
-- un conteneur Nginx servant le frontend sur le port 80 et relayant `/api` vers l'API.
+```bash
+cp .env.docker.example .env
+```
 
-Une fois cette stack ajoutée, les commandes usuelles seront :
+Remplacez les mots de passe et `JWT_SECRET` dans `.env` par des valeurs fortes avant de démarrer. Ce fichier est ignoré par Git.
+
+2. Construisez et démarrez les conteneurs :
 
 ```bash
 docker compose up -d --build
-docker compose exec api pnpm prisma migrate deploy
-docker compose exec api pnpm prisma db seed
-docker compose logs -f api
+```
+
+Lors de sa première initialisation, MySQL applique automatiquement les migrations dans l'ordre puis charge `packages/api/sql/seed.sql`. Les données sont conservées dans le volume `station_mysql_data`.
+
+- Frontend : [http://localhost:5173](http://localhost:5173)
+- API : [http://localhost:4000/health](http://localhost:4000/health)
+- phpMyAdmin : [http://localhost:8080](http://localhost:8080) — connectez-vous avec `DB_USER` et `DB_PASSWORD` du fichier `.env`.
+- MySQL depuis l'hôte : `127.0.0.1:3307`
+
+Pour suivre le démarrage :
+
+```bash
+docker compose logs -f db api frontend phpmyadmin
+```
+
+Pour arrêter les conteneurs sans supprimer les données :
+
+```bash
 docker compose down
 ```
+
+Les migrations et le seed ne sont lancés automatiquement que lors de la création initiale du volume. **Ne faites pas `docker compose down -v` sauf si vous souhaitez supprimer définitivement la base locale.**
 
 ## Available Scripts
 
@@ -255,16 +266,10 @@ docker compose down
 | Root | `pnpm dev` | Démarre l'API et le frontend en parallèle. |
 | Root | `pnpm build` | Compile l'API et construit le frontend. |
 | Root | `pnpm typecheck` | Vérifie les types des deux packages. |
-| Root | `pnpm db:generate` | Génère Prisma Client. |
-| Root | `pnpm db:migrate` | Lance les migrations Prisma en mode développement. |
 | `packages/api` | `pnpm dev` | Démarre l'API avec rechargement via `tsx watch`. |
 | `packages/api` | `pnpm build` | Compile l'API TypeScript dans `dist/`. |
 | `packages/api` | `pnpm typecheck` | Vérifie les types de l'API. |
 | `packages/api` | `pnpm start` | Lance l'API compilée. |
-| `packages/api` | `pnpm prisma:generate` | Génère Prisma Client. |
-| `packages/api` | `pnpm prisma:migrate` | Crée et applique une migration de développement. |
-| `packages/api` | `pnpm prisma:seed` | Exécute le seed de démonstration. |
-| `packages/api` | `pnpm prisma db seed` | Exécute le seed via Prisma. |
 | `packages/web` | `pnpm dev` | Démarre Vite sur le port 5173. |
 | `packages/web` | `pnpm build` | Vérifie TypeScript et construit `dist/`. |
 | `packages/web` | `pnpm typecheck` | Vérifie les types du frontend. |
@@ -276,7 +281,11 @@ docker compose down
 
 | Variable | Description | Exemple | Requise |
 |---|---|---|---|
-| `DATABASE_URL` | URL de connexion MySQL Prisma. | `mysql://root:pass@localhost:3306/station_service` | Oui |
+| `DB_HOST` | Hôte du serveur MySQL. | `127.0.0.1` | Oui |
+| `DB_USER` | Utilisateur MySQL de l’API. | `station` | Oui |
+| `DB_PASSWORD` | Mot de passe MySQL. | *(secret)* | Oui |
+| `DB_NAME` | Nom de la base MySQL. | `station_service` | Oui |
+| `DB_PORT` | Port MySQL. | `3306` | Non |
 | `JWT_SECRET` | Secret de signature JWT. | `a8f3...` | Oui |
 | `PORT` | Port d'écoute de l'API. | `4000` | Non |
 | `CORS_ORIGIN` | Origines frontend autorisées. | `http://localhost:5173` | Non |
@@ -391,8 +400,8 @@ Toutes les routes métier nécessitent un jeton Bearer, sauf `/health` et l'auth
 
 ## Troubleshooting
 
-1. **`P1001: Can't reach database server`** : MySQL n'est pas démarré ou `DATABASE_URL` contient un mauvais hôte, port ou mot de passe. Vérifiez la connexion dans HeidiSQL et redémarrez l'API.
-2. **`P3005: The database schema is not empty`** : la base contient déjà un schéma non géré par Prisma. En développement, utilisez `pnpm prisma migrate reset`, puis relancez le seed.
+1. **MySQL inaccessible** : vérifiez que le serveur fonctionne et que `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` et `DB_NAME` correspondent à votre configuration.
+2. **Table ou colonne introuvable** : confirmez que toutes les migrations SQL ont été importées dans l'ordre et dans la bonne base.
 3. **`Invalid JWT` sur toutes les requêtes** : `JWT_SECRET` diffère entre le token et le processus API. Déconnectez-vous, vérifiez `.env`, puis redémarrez l'API.
 4. **`EADDRINUSE: port 4000`** : un autre processus utilise le port 4000. Arrêtez-le ou modifiez `PORT` et `VITE_API_URL` ensemble.
 5. **Le frontend affiche `ERR_CONNECTION_REFUSED`** : l'API n'est pas démarrée sur l'URL configurée dans `VITE_API_URL`.

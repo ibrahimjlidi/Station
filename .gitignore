@@ -6,6 +6,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 
 # Build output
 dist/
@@ -23,7 +24,7 @@ yarn-debug.log*
 # Local databases and generated files
 *.sqlite
 *.sqlite3
-packages/api/prisma/*.db
+*.db
 
 # Temporary files
 *.tmp
@@ -38,5 +39,4 @@ Thumbs.db
 !.vscode/settings.json
 .idea/
 
-# Generated Prisma client
-# Keep Prisma schema and migrations tracked
+# Native MySQL schema migrations are tracked in packages/api/sql/migrations.

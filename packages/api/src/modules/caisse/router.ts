@@ -1,17 +1,16 @@
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
-import { prisma } from '../../lib/prisma.js';
-import { requireAuth, requireRole, scopeToMagasin } from '../../middleware/auth.js';
+import { execute, insertRecord, query, queryOne, withTransaction, type SqlValue } from '../../lib/db.js';
+import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { clotureSchema, creditLineSchema, depenseLineSchema, recetteLineSchema, sessionSchema, summaryParamsSchema, type SessionInput } from './caisse.schema.js';
 
 const router = Router();
 const caisseAccess = [requireAuth, requireRole('caissier', 'gerant')];
-
 const toDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
-const toNumber = (value: Prisma.Decimal | number | null | undefined) => value == null ? null : Number(value);
+const toNumber = (value: unknown) => value == null ? null : Number(value);
+type SessionTable = 'RecetteCaisse' | 'DepensesCaisse' | 'CreditCaisse';
 
 async function ensureOpen(date: Date, equipeId: number) {
-  const closure = await prisma.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId } } });
+  const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [date, equipeId]);
   if (closure?.fait) {
     const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number };
     error.statusCode = 409;
@@ -21,29 +20,38 @@ async function ensureOpen(date: Date, equipeId: number) {
 
 async function ensureSessionReferences(input: SessionInput) {
   const [equipe, caisse, vendeur] = await Promise.all([
-    prisma.equipe.findUnique({ where: { id: input.equipeId } }),
-    prisma.caisse.findUnique({ where: { id: input.caisseId } }),
-    prisma.vendeur.findUnique({ where: { id: input.vendeurId } }),
+    queryOne('SELECT actif FROM `Equipe` WHERE id = ?', [input.equipeId]),
+    queryOne('SELECT actif FROM `Caisse` WHERE id = ?', [input.caisseId]),
+    queryOne('SELECT actif FROM `Vendeur` WHERE id = ?', [input.vendeurId]),
   ]);
-  if (!equipe || !equipe.actif || !caisse || !caisse.actif || !vendeur || !vendeur.actif) {
+  if (!equipe?.actif || !caisse?.actif || !vendeur?.actif) {
     const error = new Error('Equipe, caisse ou vendeur invalide/inactif.') as Error & { statusCode?: number };
     error.statusCode = 400;
     throw error;
   }
 }
 
-const sessionWhere = (input: SessionInput) => ({ date_equipeId_caisseId: { date: toDate(input.date), equipeId: input.equipeId, caisseId: input.caisseId } });
+async function ensureSession(table: SessionTable, input: SessionInput, magasinId: number | null | undefined, extra: Record<string, SqlValue> = {}) {
+  const date = toDate(input.date);
+  const existing = await queryOne(`SELECT * FROM \`${table}\` WHERE date = ? AND equipeId = ? AND caisseId = ?`, [date, input.equipeId, input.caisseId]);
+  if (existing) {
+    await execute(`UPDATE \`${table}\` SET vendeurId = ?, updatedAt = ? WHERE id = ?`, [input.vendeurId, new Date(), existing.id]);
+    return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [existing.id]);
+  }
+  const id = await insertRecord(table, { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId, ...extra });
+  return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [id]);
+}
 
 router.get('/modes-payment', ...caisseAccess, async (_request, response, next) => {
-  try { response.json(await prisma.modePayment.findMany({ orderBy: { libelle: 'asc' } })); } catch (error) { next(error); }
+  try { response.json(await query('SELECT * FROM `ModePayment` ORDER BY libelle')); } catch (error) { next(error); }
 });
 
 router.get('/types-depenses', ...caisseAccess, async (_request, response, next) => {
-  try { response.json(await prisma.depenses.findMany({ orderBy: { typeDepense: 'asc' } })); } catch (error) { next(error); }
+  try { response.json(await query('SELECT * FROM `Depenses` ORDER BY typeDepense')); } catch (error) { next(error); }
 });
 
 router.get('/clients', ...caisseAccess, async (_request, response, next) => {
-  try { response.json(await prisma.client.findMany({ orderBy: { nomClient: 'asc' } })); } catch (error) { next(error); }
+  try { response.json(await query('SELECT * FROM `Client` ORDER BY nomClient')); } catch (error) { next(error); }
 });
 
 router.post('/recettes', ...caisseAccess, async (request, response, next) => {
@@ -52,27 +60,32 @@ router.post('/recettes', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const cuves = await prisma.cuve.findMany({ where: { magasinId: request.user?.magasinId } });
-    const reserveDepart = cuves.reduce((total, cuve) => total.plus(cuve.stock.times(cuve.prixAchatHT)), new Prisma.Decimal(0));
-    const session = await prisma.recetteCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId, reserveDepart }, update: { vendeurId: input.vendeurId } });
+    const balance = await queryOne('SELECT COALESCE(SUM(stock * prixAchatHT), 0) AS reserve FROM `Cuve` WHERE magasinId <=> ?', [request.user?.magasinId ?? null]);
+    const session = await ensureSession('RecetteCaisse', input, request.user?.magasinId, { reserveDepart: Number(balance?.reserve ?? 0) });
+    if (!session) throw new Error('Cash receipt session could not be loaded.');
     response.status(201).json({ ...session, totalRecettes: toNumber(session.totalRecettes) });
   } catch (error) { next(error); }
 });
 
 router.post('/recettes/:id/lignes', ...caisseAccess, async (request, response, next) => {
   try {
-    const recetteId = Number(request.params.id);
+    const id = Number(request.params.id);
     const input = recetteLineSchema.parse(request.body);
-    const recette = await prisma.recetteCaisse.findUnique({ where: { id: recetteId } });
-    if (!recette) { response.status(404).json({ message: 'Session de recettes introuvable.' }); return; }
-    await ensureOpen(recette.date, recette.equipeId);
-    if (recette.fait) { response.status(409).json({ message: 'La session de recettes est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailRecetteCaisse.create({ data: { numRecette: recetteId, modePaymentId: input.modePaymentId, montant: new Prisma.Decimal(input.montant), numero: input.numero, idCuve: input.idCuve } });
-      await transaction.recetteCaisse.update({ where: { id: recetteId }, data: { totalRecettes: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const result = await withTransaction(async (connection) => {
+      const session = await queryOne('SELECT * FROM `RecetteCaisse` WHERE id = ? FOR UPDATE', [id], connection);
+      if (!session) return null;
+      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
+      if (closure?.fait || session.fait) {
+        const error = new Error('La session de recettes est deja validee.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      const lineId = await insertRecord('DetailRecetteCaisse', { numRecette: id, modePaymentId: input.modePaymentId, montant: input.montant, numero: input.numero, idCuve: input.idCuve }, connection);
+      await execute('UPDATE `RecetteCaisse` SET totalRecettes = totalRecettes + ?, updatedAt = ? WHERE id = ?', [input.montant, new Date(), id], connection);
+      return queryOne('SELECT * FROM `DetailRecetteCaisse` WHERE id = ?', [lineId], connection);
     });
-    response.status(201).json({ ...line, montant: toNumber(line.montant) });
+    if (!result) { response.status(404).json({ message: 'Session de recettes introuvable.' }); return; }
+    response.status(201).json({ ...result, montant: toNumber(result.montant) });
   } catch (error) { next(error); }
 });
 
@@ -82,25 +95,31 @@ router.post('/depenses', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.depensesCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
+    const session = await ensureSession('DepensesCaisse', input, request.user?.magasinId);
+    if (!session) throw new Error('Expense session could not be loaded.');
     response.status(201).json({ ...session, totalDepenses: toNumber(session.totalDepenses) });
   } catch (error) { next(error); }
 });
 
 router.post('/depenses/:id/lignes', ...caisseAccess, async (request, response, next) => {
   try {
-    const depenseId = Number(request.params.id);
+    const id = Number(request.params.id);
     const input = depenseLineSchema.parse(request.body);
-    const depense = await prisma.depensesCaisse.findUnique({ where: { id: depenseId } });
-    if (!depense) { response.status(404).json({ message: 'Session de depenses introuvable.' }); return; }
-    await ensureOpen(depense.date, depense.equipeId);
-    if (depense.fait) { response.status(409).json({ message: 'La session de depenses est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailDepenses.create({ data: { numDepense: depenseId, codeDepense: input.codeDepense, montant: new Prisma.Decimal(input.montant), libelle: input.libelle } });
-      await transaction.depensesCaisse.update({ where: { id: depenseId }, data: { totalDepenses: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const result = await withTransaction(async (connection) => {
+      const session = await queryOne('SELECT * FROM `DepensesCaisse` WHERE id = ? FOR UPDATE', [id], connection);
+      if (!session) return null;
+      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
+      if (closure?.fait || session.fait) {
+        const error = new Error('La session de depenses est deja validee.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      const lineId = await insertRecord('DetailDepenses', { numDepense: id, codeDepense: input.codeDepense, montant: input.montant, libelle: input.libelle }, connection);
+      await execute('UPDATE `DepensesCaisse` SET totalDepenses = totalDepenses + ?, updatedAt = ? WHERE id = ?', [input.montant, new Date(), id], connection);
+      return queryOne('SELECT * FROM `DetailDepenses` WHERE id = ?', [lineId], connection);
     });
-    response.status(201).json({ ...line, montant: toNumber(line.montant) });
+    if (!result) { response.status(404).json({ message: 'Session de depenses introuvable.' }); return; }
+    response.status(201).json({ ...result, montant: toNumber(result.montant) });
   } catch (error) { next(error); }
 });
 
@@ -110,25 +129,31 @@ router.post('/credits', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await prisma.creditCaisse.upsert({ where: sessionWhere(input), create: { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId: request.user?.magasinId }, update: { vendeurId: input.vendeurId } });
+    const session = await ensureSession('CreditCaisse', input, request.user?.magasinId);
+    if (!session) throw new Error('Credit session could not be loaded.');
     response.status(201).json({ ...session, totalCredits: toNumber(session.totalCredits) });
   } catch (error) { next(error); }
 });
 
 router.post('/credits/:id/lignes', ...caisseAccess, async (request, response, next) => {
   try {
-    const creditId = Number(request.params.id);
+    const id = Number(request.params.id);
     const input = creditLineSchema.parse(request.body);
-    const credit = await prisma.creditCaisse.findUnique({ where: { id: creditId } });
-    if (!credit) { response.status(404).json({ message: 'Session de credits introuvable.' }); return; }
-    await ensureOpen(credit.date, credit.equipeId);
-    if (credit.fait) { response.status(409).json({ message: 'La session de credits est deja validee.' }); return; }
-    const line = await prisma.$transaction(async (transaction) => {
-      const created = await transaction.detailCredit.create({ data: { numCredit: creditId, clientId: input.clientId, montant: new Prisma.Decimal(input.montant), libelle: input.libelle, modePayment: input.modePayment } });
-      await transaction.creditCaisse.update({ where: { id: creditId }, data: { totalCredits: { increment: new Prisma.Decimal(input.montant) } } });
-      return created;
+    const result = await withTransaction(async (connection) => {
+      const session = await queryOne('SELECT * FROM `CreditCaisse` WHERE id = ? FOR UPDATE', [id], connection);
+      if (!session) return null;
+      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
+      if (closure?.fait || session.fait) {
+        const error = new Error('La session de credits est deja validee.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      const lineId = await insertRecord('DetailCredit', { numCredit: id, clientId: input.clientId, montant: input.montant, libelle: input.libelle, modePayment: input.modePayment }, connection);
+      await execute('UPDATE `CreditCaisse` SET totalCredits = totalCredits + ?, updatedAt = ? WHERE id = ?', [input.montant, new Date(), id], connection);
+      return queryOne('SELECT * FROM `DetailCredit` WHERE id = ?', [lineId], connection);
     });
-    response.status(201).json({ ...line, montant: toNumber(line.montant) });
+    if (!result) { response.status(404).json({ message: 'Session de credits introuvable.' }); return; }
+    response.status(201).json({ ...result, montant: toNumber(result.montant) });
   } catch (error) { next(error); }
 });
 
@@ -138,35 +163,46 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
     const date = toDate(input.date);
     if (input.forcer && request.user?.role !== 'gerant') { response.status(403).json({ message: 'Seul un gerant peut forcer une cloture avec ecart.' }); return; }
     if (input.forcer && !input.commentaire) { response.status(400).json({ message: 'Un commentaire est obligatoire pour forcer la cloture.' }); return; }
-    const result = await prisma.$transaction(async (transaction) => {
-      const closure = await transaction.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } } });
+    const result = await withTransaction(async (connection) => {
+      const closure = await queryOne('SELECT * FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ? FOR UPDATE', [date, input.equipeId], connection);
       if (closure?.fait) { const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
-      const recette = await transaction.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } });
+      const recette = await queryOne('SELECT * FROM `RecetteCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ? FOR UPDATE', [date, input.equipeId, input.caisseId], connection);
       if (!recette) { const error = new Error('Aucune session de recettes a cloturer pour cette caisse.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
       const [releves, depense, retours] = await Promise.all([
-        transaction.mobVCarCaisse.findMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId } }),
-        transaction.depensesCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } } }),
-        transaction.retourCuve.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: input.equipeId, caisseId: input.caisseId } }, include: { details: true } }),
+        query('SELECT * FROM `MobVCarCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, input.equipeId, input.caisseId], connection),
+        queryOne('SELECT * FROM `DepensesCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, input.equipeId, input.caisseId], connection),
+        queryOne('SELECT * FROM `RetourCuve` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, input.equipeId, input.caisseId], connection),
       ]);
-      const incomplete = releves.find((releve) => releve.indexFermeture == null);
-      if (incomplete) { const error = new Error('Toutes les pompes doivent avoir un index de fermeture avant la cloture.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
-      const recetteTheorique = releves.reduce((total, releve) => total.plus(releve.indexFermeture!.minus(releve.indexOuverture).times(releve.prixVente)), new Prisma.Decimal(0));
-      const retourValeur = (retours?.details ?? []).filter((detail) => detail.valide).reduce((total, detail) => total.plus(detail.valeur), new Prisma.Decimal(0));
-      const totalCaisse = recette.totalRecettes.minus(retourValeur);
-      const totalDepenses = depense?.totalDepenses ?? new Prisma.Decimal(0);
-      const reserveFinTheorique = recette.reserveDepart.minus(recetteTheorique).minus(retourValeur);
-      const ecartRecette = totalCaisse.minus(recetteTheorique);
-      const reserveFinAttendue = recette.reserveDepart.minus(recetteTheorique).minus(retourValeur);
+      if (releves.some((row) => row.indexFermeture == null)) { const error = new Error('Toutes les pompes doivent avoir un index de fermeture avant la cloture.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
+      const theoretical = await queryOne('SELECT COALESCE(SUM((indexFermeture - indexOuverture) * prixVente), 0) AS total FROM `MobVCarCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, input.equipeId, input.caisseId], connection);
+      const returnTotal = retours
+        ? await queryOne('SELECT COALESCE(SUM(valeur), 0) AS total FROM `DetailRetour` WHERE retourCuveId = ? AND valide = ?', [retours.id, true], connection)
+        : { total: 0 };
+      const recetteTheorique = Number(theoretical?.total ?? 0);
+      const retourValeur = Number(returnTotal?.total ?? 0);
+      const totalCaisse = Number(recette.totalRecettes) - retourValeur;
+      const reserveFinTheorique = Number(recette.reserveDepart) - recetteTheorique - retourValeur;
+      const ecartRecette = totalCaisse - recetteTheorique;
       const ecartCaisse = ecartRecette;
-      const tolerance = recette.seuilTolerance;
-      if (ecartCaisse.abs().greaterThan(tolerance) && !input.forcer) { const error = new Error(`Cloture bloquee: ecart de ${ecartCaisse.toFixed(3)} TND, tolerance ${tolerance.toFixed(3)} TND.`) as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
-      const updated = await transaction.recetteCaisse.update({ where: { id: recette.id }, data: { recetteTheorique, ecartRecette, reserveFinTheorique, reserveFinAttendue, ecartCaisse, commentaireEcart: input.commentaire, validePar: input.forcer ? request.user?.id : undefined, fait: true } });
-      await transaction.joursClotures.upsert({ where: { dateJour_equipeId: { dateJour: date, equipeId: input.equipeId } }, create: { dateJour: date, equipeId: input.equipeId, fait: true }, update: { fait: true } });
-      await transaction.depensesCaisse.updateMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId }, data: { fait: true } });
-      await transaction.creditCaisse.updateMany({ where: { date, equipeId: input.equipeId, caisseId: input.caisseId }, data: { fait: true } });
-      return updated;
+      const tolerance = Number(recette.seuilTolerance);
+      if (Math.abs(ecartCaisse) > tolerance && !input.forcer) {
+        const error = new Error(`Cloture bloquee: ecart de ${ecartCaisse.toFixed(3)} TND, tolerance ${tolerance.toFixed(3)} TND.`) as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      const now = new Date();
+      await execute('UPDATE `RecetteCaisse` SET recetteTheorique = ?, ecartRecette = ?, reserveFinTheorique = ?, reserveFinAttendue = ?, ecartCaisse = ?, commentaireEcart = ?, validePar = ?, fait = ?, updatedAt = ? WHERE id = ?', [recetteTheorique, ecartRecette, reserveFinTheorique, reserveFinTheorique, ecartCaisse, input.commentaire ?? null, input.forcer ? request.user?.id ?? null : null, true, now, recette.id], connection);
+      if (closure) {
+        await execute('UPDATE `JoursClotures` SET fait = ?, updatedAt = ? WHERE id = ?', [true, now, closure.id], connection);
+      } else {
+        await insertRecord('JoursClotures', { dateJour: date, equipeId: input.equipeId, fait: true }, connection);
+      }
+      await execute('UPDATE `DepensesCaisse` SET fait = ?, updatedAt = ? WHERE date = ? AND equipeId = ? AND caisseId = ?', [true, now, date, input.equipeId, input.caisseId], connection);
+      await execute('UPDATE `CreditCaisse` SET fait = ?, updatedAt = ? WHERE date = ? AND equipeId = ? AND caisseId = ?', [true, now, date, input.equipeId, input.caisseId], connection);
+      return queryOne('SELECT * FROM `RecetteCaisse` WHERE id = ?', [recette.id], connection);
     });
-    response.json({ ...result, date: result.date.toISOString().slice(0, 10), totalRecettes: toNumber(result.totalRecettes), recetteTheorique: toNumber(result.recetteTheorique), ecartRecette: toNumber(result.ecartRecette), reserveFinTheorique: toNumber(result.reserveFinTheorique), reserveFinAttendue: toNumber(result.reserveFinAttendue), ecartCaisse: toNumber(result.ecartCaisse) });
+    if (!result) throw new Error('Closed cash session could not be loaded.');
+    response.json({ ...result, date: new Date(result.date).toISOString().slice(0, 10), totalRecettes: toNumber(result.totalRecettes), recetteTheorique: toNumber(result.recetteTheorique), ecartRecette: toNumber(result.ecartRecette), reserveFinTheorique: toNumber(result.reserveFinTheorique), reserveFinAttendue: toNumber(result.reserveFinAttendue), ecartCaisse: toNumber(result.ecartCaisse) });
   } catch (error) { next(error); }
 });
 
@@ -175,21 +211,40 @@ router.get('/resume/:date/:equipeId/:caisseId', ...caisseAccess, async (request,
     const params = summaryParamsSchema.parse(request.params);
     const date = toDate(params.date);
     const [recette, depense, credit, closure] = await Promise.all([
-      prisma.recetteCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: params.equipeId, caisseId: params.caisseId } }, include: { details: { include: { modePayment: true, cuve: true } } } }),
-      prisma.depensesCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: params.equipeId, caisseId: params.caisseId } }, include: { details: { include: { type: true } } } }),
-      prisma.creditCaisse.findUnique({ where: { date_equipeId_caisseId: { date, equipeId: params.equipeId, caisseId: params.caisseId } }, include: { details: { include: { client: true } } } }),
-      prisma.joursClotures.findUnique({ where: { dateJour_equipeId: { dateJour: date, equipeId: params.equipeId } } }),
+      queryOne('SELECT * FROM `RecetteCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, params.equipeId, params.caisseId]),
+      queryOne('SELECT * FROM `DepensesCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, params.equipeId, params.caisseId]),
+      queryOne('SELECT * FROM `CreditCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ?', [date, params.equipeId, params.caisseId]),
+      queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [date, params.equipeId]),
+    ]);
+    const [recettes, depenses, credits] = await Promise.all([
+      recette ? query('SELECT d.*, m.libelle AS modeLibelle, c.id AS cuveId, c.libelle AS cuveLibelle FROM `DetailRecetteCaisse` d JOIN `ModePayment` m ON m.id = d.modePaymentId LEFT JOIN `Cuve` c ON c.id = d.idCuve WHERE d.numRecette = ?', [recette.id]) : [],
+      depense ? query('SELECT d.*, t.typeDepense FROM `DetailDepenses` d JOIN `Depenses` t ON t.id = d.codeDepense WHERE d.numDepense = ?', [depense.id]) : [],
+      credit ? query('SELECT d.*, c.nomClient FROM `DetailCredit` d JOIN `Client` c ON c.id = d.clientId WHERE d.numCredit = ?', [credit.id]) : [],
     ]);
     const totalRecettes = Number(recette?.totalRecettes ?? 0);
     const totalDepenses = Number(depense?.totalDepenses ?? 0);
     const totalCredits = Number(credit?.totalCredits ?? 0);
     const breakdown = new Map<number, { modePaymentId: number; libelle: string; montant: number }>();
-    for (const line of recette?.details ?? []) {
-      const current = breakdown.get(line.modePaymentId) ?? { modePaymentId: line.modePaymentId, libelle: line.modePayment.libelle, montant: 0 };
+    for (const line of recettes) {
+      const key = Number(line.modePaymentId);
+      const current = breakdown.get(key) ?? { modePaymentId: key, libelle: line.modeLibelle, montant: 0 };
       current.montant += Number(line.montant);
-      breakdown.set(line.modePaymentId, current);
+      breakdown.set(key, current);
     }
-    response.json({ recetteId: recette?.id ?? null, depenseId: depense?.id ?? null, creditId: credit?.id ?? null, totalRecettes, totalDepenses, totalCredits, soldeNet: totalRecettes - totalDepenses - totalCredits, fait: Boolean(closure?.fait), recettes: (recette?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), cuve: line.cuve ? { id: line.cuve.id, libelle: line.cuve.libelle } : null })), depenses: (depense?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant) })), credits: (credit?.details ?? []).map((line) => ({ ...line, montant: toNumber(line.montant), client: { id: line.client.id, nomClient: line.client.nomClient } })), breakdown: [...breakdown.values()] });
+    response.json({
+      recetteId: recette?.id ?? null,
+      depenseId: depense?.id ?? null,
+      creditId: credit?.id ?? null,
+      totalRecettes,
+      totalDepenses,
+      totalCredits,
+      soldeNet: totalRecettes - totalDepenses - totalCredits,
+      fait: Boolean(closure?.fait),
+      recettes: recettes.map((line) => ({ ...line, montant: toNumber(line.montant), cuve: line.cuveId == null ? null : { id: line.cuveId, libelle: line.cuveLibelle } })),
+      depenses: depenses.map((line) => ({ ...line, montant: toNumber(line.montant) })),
+      credits: credits.map((line) => ({ ...line, montant: toNumber(line.montant), client: { id: line.clientId, nomClient: line.nomClient } })),
+      breakdown: [...breakdown.values()],
+    });
   } catch (error) { next(error); }
 });
 
