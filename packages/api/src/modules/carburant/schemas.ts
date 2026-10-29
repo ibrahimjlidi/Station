@@ -10,10 +10,12 @@ export const releverSchema = z.object({
   pompeId: z.coerce.number().int().positive(),
   vendeurId: z.coerce.number().int().positive(),
   indexOuverture: positiveDecimal,
+  raisonCorrection: z.string().trim().min(1).max(1000).optional(),
 });
 
 export const fermerSchema = z.object({
   indexFermeture: positiveDecimal,
+  raisonCorrection: z.string().trim().min(1).max(1000).optional(),
 });
 
 const code = z.string().trim().min(1).max(30);

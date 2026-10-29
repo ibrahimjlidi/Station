@@ -2,21 +2,14 @@ import { Router } from 'express';
 import { execute, insertRecord, query, queryOne, withTransaction, type SqlValue } from '../../lib/db.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { clotureSchema, creditLineSchema, depenseLineSchema, recetteLineSchema, sessionSchema, summaryParamsSchema, type SessionInput } from './caisse.schema.js';
+import { closureAuditValues, lockShiftClosure, requireOpenShift } from './closure-policy.js';
+import type { PoolConnection } from 'mysql2/promise';
 
 const router = Router();
 const caisseAccess = [requireAuth, requireRole('caissier', 'gerant')];
 const toDate = (value: string) => new Date(`${value}T00:00:00.000Z`);
 const toNumber = (value: unknown) => value == null ? null : Number(value);
 type SessionTable = 'RecetteCaisse' | 'DepensesCaisse' | 'CreditCaisse';
-
-async function ensureOpen(date: Date, equipeId: number) {
-  const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [date, equipeId]);
-  if (closure?.fait) {
-    const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number };
-    error.statusCode = 409;
-    throw error;
-  }
-}
 
 async function ensureSessionReferences(input: SessionInput) {
   const [equipe, caisse, vendeur] = await Promise.all([
@@ -31,15 +24,20 @@ async function ensureSessionReferences(input: SessionInput) {
   }
 }
 
-async function ensureSession(table: SessionTable, input: SessionInput, magasinId: number | null | undefined, extra: Record<string, SqlValue> = {}) {
+async function ensureSession(table: SessionTable, input: SessionInput, magasinId: number | null | undefined, connection: PoolConnection, extra: Record<string, SqlValue> = {}) {
   const date = toDate(input.date);
-  const existing = await queryOne(`SELECT * FROM \`${table}\` WHERE date = ? AND equipeId = ? AND caisseId = ?`, [date, input.equipeId, input.caisseId]);
+  const existing = await queryOne(`SELECT * FROM \`${table}\` WHERE date = ? AND equipeId = ? AND caisseId = ? FOR UPDATE`, [date, input.equipeId, input.caisseId], connection);
   if (existing) {
-    await execute(`UPDATE \`${table}\` SET vendeurId = ?, updatedAt = ? WHERE id = ?`, [input.vendeurId, new Date(), existing.id]);
-    return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [existing.id]);
+    if (existing.fait) {
+      const error = new Error('Cette session est deja cloturee.') as Error & { statusCode: number };
+      error.statusCode = 409;
+      throw error;
+    }
+    await execute(`UPDATE \`${table}\` SET vendeurId = ?, updatedAt = ? WHERE id = ?`, [input.vendeurId, new Date(), existing.id], connection);
+    return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [existing.id], connection);
   }
-  const id = await insertRecord(table, { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId, ...extra });
-  return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [id]);
+  const id = await insertRecord(table, { date, equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId, ...extra }, connection);
+  return queryOne(`SELECT * FROM \`${table}\` WHERE id = ?`, [id], connection);
 }
 
 router.get('/modes-payment', ...caisseAccess, async (_request, response, next) => {
@@ -58,10 +56,12 @@ router.post('/recettes', ...caisseAccess, async (request, response, next) => {
   try {
     const input = sessionSchema.parse(request.body);
     const date = toDate(input.date);
-    await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const balance = await queryOne('SELECT COALESCE(SUM(stock * prixAchatHT), 0) AS reserve FROM `Cuve` WHERE magasinId <=> ?', [request.user?.magasinId ?? null]);
-    const session = await ensureSession('RecetteCaisse', input, request.user?.magasinId, { reserveDepart: Number(balance?.reserve ?? 0) });
+    const session = await withTransaction(async (connection) => {
+      await requireOpenShift(date, input.equipeId, connection);
+      const balance = await queryOne('SELECT COALESCE(SUM(stock * prixAchatHT), 0) AS reserve FROM `Cuve` WHERE magasinId <=> ?', [request.user?.magasinId ?? null], connection);
+      return ensureSession('RecetteCaisse', input, request.user?.magasinId, connection, { reserveDepart: Number(balance?.reserve ?? 0) });
+    });
     if (!session) throw new Error('Cash receipt session could not be loaded.');
     response.status(201).json({ ...session, totalRecettes: toNumber(session.totalRecettes) });
   } catch (error) { next(error); }
@@ -72,10 +72,12 @@ router.post('/recettes/:id/lignes', ...caisseAccess, async (request, response, n
     const id = Number(request.params.id);
     const input = recetteLineSchema.parse(request.body);
     const result = await withTransaction(async (connection) => {
+      const reference = await queryOne('SELECT date, equipeId FROM `RecetteCaisse` WHERE id = ?', [id], connection);
+      if (!reference) return null;
+      await requireOpenShift(new Date(reference.date), Number(reference.equipeId), connection);
       const session = await queryOne('SELECT * FROM `RecetteCaisse` WHERE id = ? FOR UPDATE', [id], connection);
       if (!session) return null;
-      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
-      if (closure?.fait || session.fait) {
+      if (session.fait) {
         const error = new Error('La session de recettes est deja validee.') as Error & { statusCode?: number };
         error.statusCode = 409;
         throw error;
@@ -93,9 +95,11 @@ router.post('/depenses', ...caisseAccess, async (request, response, next) => {
   try {
     const input = sessionSchema.parse(request.body);
     const date = toDate(input.date);
-    await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await ensureSession('DepensesCaisse', input, request.user?.magasinId);
+    const session = await withTransaction(async (connection) => {
+      await requireOpenShift(date, input.equipeId, connection);
+      return ensureSession('DepensesCaisse', input, request.user?.magasinId, connection);
+    });
     if (!session) throw new Error('Expense session could not be loaded.');
     response.status(201).json({ ...session, totalDepenses: toNumber(session.totalDepenses) });
   } catch (error) { next(error); }
@@ -106,10 +110,12 @@ router.post('/depenses/:id/lignes', ...caisseAccess, async (request, response, n
     const id = Number(request.params.id);
     const input = depenseLineSchema.parse(request.body);
     const result = await withTransaction(async (connection) => {
+      const reference = await queryOne('SELECT date, equipeId FROM `DepensesCaisse` WHERE id = ?', [id], connection);
+      if (!reference) return null;
+      await requireOpenShift(new Date(reference.date), Number(reference.equipeId), connection);
       const session = await queryOne('SELECT * FROM `DepensesCaisse` WHERE id = ? FOR UPDATE', [id], connection);
       if (!session) return null;
-      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
-      if (closure?.fait || session.fait) {
+      if (session.fait) {
         const error = new Error('La session de depenses est deja validee.') as Error & { statusCode?: number };
         error.statusCode = 409;
         throw error;
@@ -127,9 +133,11 @@ router.post('/credits', ...caisseAccess, async (request, response, next) => {
   try {
     const input = sessionSchema.parse(request.body);
     const date = toDate(input.date);
-    await ensureOpen(date, input.equipeId);
     await ensureSessionReferences(input);
-    const session = await ensureSession('CreditCaisse', input, request.user?.magasinId);
+    const session = await withTransaction(async (connection) => {
+      await requireOpenShift(date, input.equipeId, connection);
+      return ensureSession('CreditCaisse', input, request.user?.magasinId, connection);
+    });
     if (!session) throw new Error('Credit session could not be loaded.');
     response.status(201).json({ ...session, totalCredits: toNumber(session.totalCredits) });
   } catch (error) { next(error); }
@@ -140,10 +148,12 @@ router.post('/credits/:id/lignes', ...caisseAccess, async (request, response, ne
     const id = Number(request.params.id);
     const input = creditLineSchema.parse(request.body);
     const result = await withTransaction(async (connection) => {
+      const reference = await queryOne('SELECT date, equipeId FROM `CreditCaisse` WHERE id = ?', [id], connection);
+      if (!reference) return null;
+      await requireOpenShift(new Date(reference.date), Number(reference.equipeId), connection);
       const session = await queryOne('SELECT * FROM `CreditCaisse` WHERE id = ? FOR UPDATE', [id], connection);
       if (!session) return null;
-      const closure = await queryOne('SELECT fait FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ?', [session.date, session.equipeId], connection);
-      if (closure?.fait || session.fait) {
+      if (session.fait) {
         const error = new Error('La session de credits est deja validee.') as Error & { statusCode?: number };
         error.statusCode = 409;
         throw error;
@@ -164,7 +174,7 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
     if (input.forcer && request.user?.role !== 'gerant') { response.status(403).json({ message: 'Seul un gerant peut forcer une cloture avec ecart.' }); return; }
     if (input.forcer && !input.commentaire) { response.status(400).json({ message: 'Un commentaire est obligatoire pour forcer la cloture.' }); return; }
     const result = await withTransaction(async (connection) => {
-      const closure = await queryOne('SELECT * FROM `JoursClotures` WHERE dateJour = ? AND equipeId = ? FOR UPDATE', [date, input.equipeId], connection);
+      const closure = await lockShiftClosure(date, input.equipeId, connection);
       if (closure?.fait) { const error = new Error('Cette equipe est deja cloturee pour cette date.') as Error & { statusCode?: number }; error.statusCode = 409; throw error; }
       const recette = await queryOne('SELECT * FROM `RecetteCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ? FOR UPDATE', [date, input.equipeId, input.caisseId], connection);
       if (!recette) { const error = new Error('Aucune session de recettes a cloturer pour cette caisse.') as Error & { statusCode?: number }; error.statusCode = 400; throw error; }
@@ -192,11 +202,8 @@ router.post('/cloturer', ...caisseAccess, async (request, response, next) => {
       }
       const now = new Date();
       await execute('UPDATE `RecetteCaisse` SET recetteTheorique = ?, ecartRecette = ?, reserveFinTheorique = ?, reserveFinAttendue = ?, ecartCaisse = ?, commentaireEcart = ?, validePar = ?, fait = ?, updatedAt = ? WHERE id = ?', [recetteTheorique, ecartRecette, reserveFinTheorique, reserveFinTheorique, ecartCaisse, input.commentaire ?? null, input.forcer ? request.user?.id ?? null : null, true, now, recette.id], connection);
-      if (closure) {
-        await execute('UPDATE `JoursClotures` SET fait = ?, updatedAt = ? WHERE id = ?', [true, now, closure.id], connection);
-      } else {
-        await insertRecord('JoursClotures', { dateJour: date, equipeId: input.equipeId, fait: true }, connection);
-      }
+      const audit = closureAuditValues(request.user!.id, input.forcer, input.commentaire);
+      await execute('UPDATE `JoursClotures` SET fait = ?, closedByUserId = ?, closedAt = ?, forced = ?, closureReason = ?, updatedAt = ? WHERE id = ?', [true, audit.closedByUserId, audit.closedAt, audit.forced, audit.closureReason, now, closure.id], connection);
       await execute('UPDATE `DepensesCaisse` SET fait = ?, updatedAt = ? WHERE date = ? AND equipeId = ? AND caisseId = ?', [true, now, date, input.equipeId, input.caisseId], connection);
       await execute('UPDATE `CreditCaisse` SET fait = ?, updatedAt = ? WHERE date = ? AND equipeId = ? AND caisseId = ?', [true, now, date, input.equipeId, input.caisseId], connection);
       return queryOne('SELECT * FROM `RecetteCaisse` WHERE id = ?', [recette.id], connection);

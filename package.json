@@ -6,6 +6,7 @@
     "dev": "pnpm --parallel --filter @station/api --filter @station/web dev",
     "build": "pnpm --parallel --filter @station/api --filter @station/web build",
     "typecheck": "pnpm --parallel --filter @station/api --filter @station/web typecheck",
+    "test": "pnpm --filter @station/api test",
     "smoke": "node scripts/smoke-production.mjs"
   },
   "devDependencies": {

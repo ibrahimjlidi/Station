@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { execute, insertRecord, query, queryOne, withTransaction, type SqlRow, type SqlValue } from '../../lib/db.js';
 import { authMiddleware, requireRole, type AuthRequest } from '../../middleware/auth.js';
+import { authorizeClosedIndexCorrection, authorizeOpeningIndex, soldQuantity } from './meter-policy.js';
+import { requireOpenShift } from '../caisse/closure-policy.js';
 import { caisseSchema, cuveSchema, equipeSchema, fermerSchema, inventaireCarburantSchema, jaugeageFilterSchema, jaugeageSchema, jaugeagesSchema, pompeSchema, releverSchema, retourSchema } from './schemas.js';
 
 const router = Router();
@@ -149,17 +151,59 @@ router.get('/releves', async (_request, response, next) => {
 router.post('/pompes/relever', requireRole('gerant', 'caissier'), async (request, response, next) => {
   try {
     const input = releverSchema.parse(request.body);
-    const pump = await queryOne('SELECT * FROM `Pompe` WHERE id = ?', [input.pompeId]);
-    if (!pump || !pump.active) { response.status(404).json({ message: 'Pompe introuvable ou inactive.' }); return; }
     const date = toDate(input.date);
-    const existing = await queryOne('SELECT id FROM `MobVCarCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ? AND pompeId = ?', [date, input.equipeId, input.caisseId, input.pompeId]);
-    if (existing) { response.status(409).json({ message: 'Un relevé existe déjà pour cette date, cette équipe, cette caisse et cette pompe.', id: existing.id }); return; }
-    const previous = await queryOne('SELECT indexFermeture FROM `MobVCarCaisse` WHERE pompeId = ? AND caisseId = ? AND date <= ? AND indexFermeture IS NOT NULL ORDER BY date DESC, createdAt DESC LIMIT 1', [input.pompeId, input.caisseId, date]);
-    if (previous && Number(input.indexOuverture) !== Number(previous.indexFermeture)) {
-      response.status(409).json({ message: `L'index d'ouverture doit reprendre la fermeture précédente (${previous.indexFermeture}).`, expected: asNumber(previous.indexFermeture) });
-      return;
-    }
-    const id = await insertRecord('MobVCarCaisse', { ...input, date, prixVente: pump.prixVente });
+    const id = await withTransaction(async (connection) => {
+      const pumpScope = scope(request, 'p');
+      const pump = await queryOne(`SELECT p.* FROM \`Pompe\` p WHERE p.id = ?${pumpScope.sql} FOR UPDATE`, [input.pompeId, ...pumpScope.values], connection);
+      if (!pump || !pump.active) {
+        const error = new Error('Pompe introuvable ou inactive.') as Error & { statusCode?: number };
+        error.statusCode = 404;
+        throw error;
+      }
+
+      await requireOpenShift(date, input.equipeId, connection);
+
+      const existing = await queryOne('SELECT id FROM `MobVCarCaisse` WHERE date = ? AND equipeId = ? AND caisseId = ? AND pompeId = ? FOR UPDATE', [date, input.equipeId, input.caisseId, input.pompeId], connection);
+      if (existing) {
+        const error = new Error('Un relevé existe déjà pour cette date, cette équipe, cette caisse et cette pompe.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const previous = await queryOne('SELECT id, date, indexFermeture FROM `MobVCarCaisse` WHERE pompeId = ? ORDER BY date DESC, createdAt DESC, id DESC LIMIT 1 FOR UPDATE', [input.pompeId], connection);
+      if (previous && new Date(previous.date).getTime() > date.getTime()) {
+        const error = new Error('A reading cannot be inserted before a more recent pump reading.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      if (previous && previous.indexFermeture == null) {
+        const error = new Error('The previous meter reading must be closed before starting another shift.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const decision = authorizeOpeningIndex(input.indexOuverture, previous ? Number(previous.indexFermeture) : null, request.user!.role, input.raisonCorrection);
+      const readingId = await insertRecord('MobVCarCaisse', {
+        date,
+        equipeId: input.equipeId,
+        caisseId: input.caisseId,
+        pompeId: input.pompeId,
+        vendeurId: input.vendeurId,
+        indexOuverture: input.indexOuverture,
+        prixVente: pump.prixVente,
+      }, connection);
+      if (decision !== 'continuous') {
+        await insertRecord('MobVCarCaisseAudit', {
+          readingId,
+          actorUserId: request.user!.id,
+          action: decision,
+          oldIndex: previous?.indexFermeture ?? null,
+          newIndex: input.indexOuverture,
+          reason: input.raisonCorrection!.trim(),
+        }, connection);
+      }
+      return readingId;
+    });
     const releve = await queryOne('SELECT * FROM `MobVCarCaisse` WHERE id = ?', [id]);
     if (!releve) throw new Error('Created pump reading could not be loaded.');
     response.status(201).json({ ...releve, indexOuverture: asNumber(releve.indexOuverture), prixVente: asNumber(releve.prixVente) });
@@ -170,13 +214,33 @@ router.patch('/pompes/relever/:id/fermer', requireRole('gerant', 'caissier'), as
   try {
     const id = Number(request.params.id);
     const input = fermerSchema.parse(request.body);
-    const reading = await queryOne('SELECT * FROM `MobVCarCaisse` WHERE id = ?', [id]);
-    if (!reading) { response.status(404).json({ message: 'Releve introuvable.' }); return; }
-    if (input.indexFermeture < Number(reading.indexOuverture)) { response.status(400).json({ message: "L'index de fermeture doit etre superieur ou egal a l'ouverture." }); return; }
-    await execute('UPDATE `MobVCarCaisse` SET indexFermeture = ?, updatedAt = ? WHERE id = ?', [input.indexFermeture, new Date(), id]);
+    const result = await withTransaction(async (connection) => {
+      const filters = scope(request, 'p');
+      const reading = await queryOne(`SELECT r.*, p.magasinId FROM \`MobVCarCaisse\` r JOIN \`Pompe\` p ON p.id = r.pompeId WHERE r.id = ?${filters.sql} FOR UPDATE`, [id, ...filters.values], connection);
+      if (!reading) {
+        const error = new Error('Releve introuvable.') as Error & { statusCode?: number };
+        error.statusCode = 404;
+        throw error;
+      }
+      await requireOpenShift(new Date(reading.date), Number(reading.equipeId), connection);
+      const quantity = soldQuantity(Number(reading.indexOuverture), input.indexFermeture);
+      if (reading.indexFermeture != null && Number(reading.indexFermeture) !== input.indexFermeture) {
+        authorizeClosedIndexCorrection(request.user!.role, input.raisonCorrection);
+        await insertRecord('MobVCarCaisseAudit', {
+          readingId: id,
+          actorUserId: request.user!.id,
+          action: 'closing_correction',
+          oldIndex: Number(reading.indexFermeture),
+          newIndex: input.indexFermeture,
+          reason: input.raisonCorrection!.trim(),
+        }, connection);
+      }
+      await execute('UPDATE `MobVCarCaisse` SET indexFermeture = ?, updatedAt = ? WHERE id = ?', [input.indexFermeture, new Date(), id], connection);
+      return quantity;
+    });
     const updated = await queryOne('SELECT * FROM `MobVCarCaisse` WHERE id = ?', [id]);
     if (!updated) throw new Error('Updated pump reading could not be loaded.');
-    response.json({ ...updated, indexOuverture: asNumber(updated.indexOuverture), indexFermeture: asNumber(updated.indexFermeture), prixVente: asNumber(updated.prixVente), ca: (Number(updated.indexFermeture) - Number(updated.indexOuverture)) * Number(updated.prixVente) });
+    response.json({ ...updated, indexOuverture: asNumber(updated.indexOuverture), indexFermeture: asNumber(updated.indexFermeture), prixVente: asNumber(updated.prixVente), quantiteVendue: result, ca: result * Number(updated.prixVente) });
   } catch (error) { next(error); }
 });
 
@@ -203,6 +267,7 @@ router.post('/retours', requireRole('caissier', 'gerant'), async (request, respo
     });
     const magasinId = await activeMagasinId(request);
     const id = await withTransaction(async (connection) => {
+      await requireOpenShift(toDate(input.date), input.equipeId, connection);
       const retourId = await insertRecord('RetourCuve', { date: toDate(input.date), equipeId: input.equipeId, caisseId: input.caisseId, vendeurId: input.vendeurId, magasinId, totalVolume: lines.reduce((sum, line) => sum + line.volume, 0), totalValeur: lines.reduce((sum, line) => sum + line.valeur, 0) }, connection);
       for (const line of lines) {
         await insertRecord('DetailRetour', { retourCuveId: retourId, pompeId: line.pompeId, cuveId: line.cuveId, volume: line.volume, valeur: line.valeur, tauxTVA: line.tauxTVA }, connection);
@@ -326,12 +391,18 @@ router.post('/jaugeages', requireRole('caissier', 'gerant'), async (request, res
     const input = jaugeageSchema.parse(request.body);
     const { teamId, tillId } = await defaultSessionIds(request, input.equipeId, input.caisseId);
     if (!teamId || !tillId) { response.status(400).json({ message: 'Une equipe et une caisse sont requises.' }); return; }
-    const cuve = await queryOne('SELECT * FROM `Cuve` WHERE id = ?', [input.cuveId]);
-    if (!cuve) { response.status(400).json({ message: 'Cuve introuvable.' }); return; }
-    const id = await insertRecord('Jaugeage', { date: toDate(input.date), cuveId: input.cuveId, equipeId: teamId, caisseId: tillId, niveau: input.quantite, quantite: input.quantite });
-    const row = await queryOne('SELECT * FROM `Jaugeage` WHERE id = ?', [id]);
-    if (!row) throw new Error('Created tank gauge could not be loaded.');
-    response.status(201).json({ ...row, niveau: asNumber(row.niveau), quantite: asNumber(row.quantite), ecart: Number(row.quantite) - Number(cuve.stock) });
+    const result = await withTransaction(async (connection) => {
+      await requireOpenShift(toDate(input.date), teamId, connection);
+      const cuve = await queryOne('SELECT * FROM `Cuve` WHERE id = ?', [input.cuveId], connection);
+      if (!cuve) return null;
+      const id = await insertRecord('Jaugeage', { date: toDate(input.date), cuveId: input.cuveId, equipeId: teamId, caisseId: tillId, niveau: input.quantite, quantite: input.quantite }, connection);
+      const row = await queryOne('SELECT * FROM `Jaugeage` WHERE id = ?', [id], connection);
+      if (!row) throw new Error('Created tank gauge could not be loaded.');
+      return { row, stock: Number(cuve.stock) };
+    });
+    if (!result) { response.status(400).json({ message: 'Cuve introuvable.' }); return; }
+    const { row, stock } = result;
+    response.status(201).json({ ...row, niveau: asNumber(row.niveau), quantite: asNumber(row.quantite), ecart: Number(row.quantite) - stock });
   } catch (error) { next(error); }
 });
 
@@ -341,6 +412,7 @@ router.post('/jaugeages/batch', requireRole('caissier', 'gerant'), async (reques
     const { teamId, tillId } = await defaultSessionIds(request, input.equipeId, input.caisseId);
     if (!teamId || !tillId) { response.status(400).json({ message: 'Une equipe et une caisse sont requises.' }); return; }
     const rows = await withTransaction(async (connection) => {
+      await requireOpenShift(toDate(input.date), teamId, connection);
       const result = [];
       for (const line of input.lignes) {
         const cuve = await queryOne('SELECT * FROM `Cuve` WHERE id = ?', [line.cuveId], connection);

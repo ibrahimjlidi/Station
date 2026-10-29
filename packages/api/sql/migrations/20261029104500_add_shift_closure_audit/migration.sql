@@ -1,0 +1,5 @@
+ALTER TABLE `JoursClotures`
+    ADD COLUMN `closedByUserId` INTEGER NULL,
+    ADD COLUMN `closedAt` DATETIME(3) NULL,
+    ADD COLUMN `forced` BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN `closureReason` VARCHAR(1000) NULL;
